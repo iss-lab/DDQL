@@ -10,12 +10,12 @@ require 'ddql'
 
 PARSER = DDQL::Parser.new
 
-if RUBY_PLATFORM == 'java'
-  require "irb"
-  puts 'Create a new instance of the parser or use the PARSER constant'
-  IRB.start(__FILE__)
-else
+begin
   require 'pry'
   puts 'Create a new instance of the parser or use the PARSER constant'
   Pry.start
+rescue
+  require "irb"
+  puts 'Create a new instance of the parser or use the PARSER constant'
+  IRB.start(__FILE__)
 end
