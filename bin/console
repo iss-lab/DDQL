@@ -7,10 +7,15 @@ require 'ddql'
 # with your gem easier. You can also use a different console, if you like.
 
 # (If you use this, don't forget to add pry to your Gemfile!)
-require 'pry'
-PARSER = DDQL::Parser.new
-puts 'Create a new instance of the parser or use the PARSER constant'
-Pry.start
 
-# require "irb"
-# IRB.start(__FILE__)
+PARSER = DDQL::Parser.new
+
+if RUBY_PLATFORM == 'java'
+  require "irb"
+  puts 'Create a new instance of the parser or use the PARSER constant'
+  IRB.start(__FILE__)
+else
+  require 'pry'
+  puts 'Create a new instance of the parser or use the PARSER constant'
+  Pry.start
+end
