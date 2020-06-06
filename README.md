@@ -1,5 +1,7 @@
 # DDQL
 
+[![Build Status](https://travis-ci.com/iss-lab/DDQL.svg?branch=master)](https://travis-ci.com/iss-lab/DDQL)
+
 A (Ruby) DataDesk query language parser written in Parslet.
 
 ## Installation
