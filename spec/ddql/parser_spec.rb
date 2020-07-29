@@ -1,154 +1,1261 @@
-require 'parslet/convenience'
+require 'yaml'
 
-RSpec.describe DDQL::Parser do
-  array_operators = {
-    'ALL'  => :op_all,
-    'ANY'  => :op_any,
-    'IN'   => :op_in,
-    'NONE' => :op_none,
-  }
-  date_relational_operators = {
-    'PRE'  => :op_date_before,
-    'PST'  => :op_date_after,
-  }
-  relational_operators = {
-    '>'  => :op_gt,
-    '>=' => :op_ge,
-    '<'  => :op_lt,
-    '<=' => :op_le,
-    '='  => :op_eq,
-    '!=' => :op_ne,
-  }
-  string_relational_operators = {
-    'CTN'  => :op_ctn,
-    'LCTN' => :op_ctn,
-    'STW'  => :op_stw,
-  }
-  null_types = %w[
-    NO_INFORMATION
-    NOT_APPLICABLE
-    NOT_COLLECTED
-    NOT_DISCLOSED
-    NOT_MEANINGFUL
-  ]
+describe DDQL::Parser do
+  let(:parser) { described_class.new expr }
 
-  let(:parser) { described_class.new }
+  context 'COALESCE' do
+    let(:a_factor) { 'ViolentVideoGamesInvolvementFund' }
+    let(:b_factor) { 'ViolentVideoGamesInvolvement' }
+    let(:sub_expr) { "COALESCE '#{a_factor}|#{b_factor}'" }
 
-  # it 'should parse long expressions without error' do
-  #   expression = File.read spec_resource 'support/long-expr.txt'
-  #   expect  {parser.parse_with_debug expression }.not_to raise_error
-  # end
+    context 'with comparison' do
+      let(:expr)     { "#{sub_expr} ANY 'Production'" }
+      let(:expected) {{
+        left: {
+          op_coalesce: {
+            factors: {
+              left_factor: {factor: a_factor},
+              right_factor: {factor: b_factor},
+            },
+          },
+        },
+        op: {op_any: 'ANY'},
+        right: {string: 'Production'},
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'without comparison' do
+      let(:expr)     { sub_expr }
+      let(:expected) {{
+        op_coalesce: {
+          factors: {
+            left_factor: {factor: a_factor},
+            right_factor: {factor: b_factor},
+          },
+        },
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+  end
+
+  context 'LOOKUP BY' do
+    let(:key_factor) { 'ESGRatingParentEntityID' }
+    let(:str_factor) { 'IssuerName' }
+    let(:sub_expr)   { "[#{str_factor}] LOOKUP BY [#{key_factor}]" }
+
+    context 'with comparison' do
+      let(:expr)     { "#{sub_expr} = 'Acme Corp.'" }
+      let(:expected) {{
+        left: {
+          left: {factor: str_factor},
+          op: {op_lookup_by: 'LOOKUP BY'},
+          right: {factor: key_factor},
+        },
+        op: {op_eq: '='},
+        right: {string: 'Acme Corp.'},
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'without comparison' do
+      let(:expr)     { sub_expr }
+      let(:expected) {{
+        left: {factor: str_factor},
+        op: {op_lookup_by: 'LOOKUP BY'},
+        right: {factor: key_factor},
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+  end
+
+  context 'boolean expressions' do
+    context 'simple AND' do
+      let(:expr)     { "[foo] = '1' AND [bar] != '2'" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        boolean_operator: {op_and: "AND"},
+        lstatement: {
+          left: {factor: "foo"},
+          op: {op_eq: "="},
+          right: {int: 1},
+        },
+        rstatement: {
+          left: {factor: "bar"},
+          op: {op_ne: "!="},
+          right: {int: 2},
+        },
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'simple OR' do
+      let(:expr)     { "[foo] = '1' OR [bar] != '2'" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        boolean_operator: {op_or: "OR"},
+        lstatement: {
+          left: {factor: "foo"},
+          op: {op_eq: "="},
+          right: {int: 1},
+        },
+        rstatement: {
+          left: {factor: "bar"},
+          op: {op_ne: "!="},
+          right: {int: 2},
+        },
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'negated left comparison with parens' do
+      let(:expr)     { "NOT([foo] = '1') AND [bar] = '2'" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        lstatement: {
+          op_not: 'NOT',
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          left: {factor: 'bar'},
+          op: {op_eq: '='},
+          right: {int: 2},
+        },
+      }}
+
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'negated parenthetical expression' do
+      let(:expr)     { "NOT([foo] = '1' AND [bar] = '2')" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        op_not: 'NOT',
+        lstatement: {
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          left: {factor: 'bar'},
+          op: {op_eq: '='},
+          right: {int: 2},
+        },
+      }}
+
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'negated right comparison' do
+      let(:expr)     { "([foo] = '1') AND NOT ([bar] = '2')" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        lstatement: {
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          op_not: 'NOT',
+          left: {factor: 'bar'},
+          op: {op_eq: '='},
+          right: {int: 2},
+        },
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'negated phrase' do
+      let(:expr)     { "([foo] = '1') AND NOT ([bar] = '2' OR [baz] = '3')" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        lstatement: {
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          op_not: 'NOT',
+          lstatement: {
+            left: {factor: 'bar'},
+            op: {op_eq: '='},
+            right: {int: 2},
+          },
+          boolean_operator: {op_or: 'OR'},
+          rstatement: {
+            left: {factor: 'baz'},
+            op: {op_eq: '='},
+            right: {int: 3},
+          },
+        },
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'single paren clause' do
+      let(:expr)     { "([foo] = '1') AND [bar] != '2'" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        boolean_operator: {op_and: "AND"},
+        lstatement: {
+          left: {factor: "foo"},
+          op: {op_eq: "="},
+          right: {int: 1},
+        },
+        rstatement: {
+          left: {factor: "bar"},
+          op: {op_ne: "!="},
+          right: {int: 2},
+        }
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'extraneous parens' do
+      let(:expr)     { "((( [foo] = '1.7' AND [bar] != '3.5' ) ) )" }
+      let(:parsed)   { described_class.new(expr).parse }
+      let(:expected) {{
+        boolean_operator: {op_and: "AND"},
+        lstatement: {
+          left: {factor: "foo"},
+          op: {op_eq: "="},
+          right: {float: 1.7},
+        },
+        rstatement: {
+          left: {factor: "bar"},
+          op: {op_ne: "!="},
+          right: {float: 3.5},
+        },
+      }}
+      it { expect(parsed).to eq expected }
+    end
+
+    context 'array operators =>' do
+      {
+        'ALL'   => :op_all,
+        'ANY'   => :op_any,
+        'EMPTY' => :op_empty,
+        'IN'    => :op_in,
+        'NONE'  => :op_none,
+      }.each do |op, op_name|
+        expression_structs = [
+          {expr: "[ABCDEF_GHIJK] #{op}#{op_name == :op_empty ? '' : " '1|2|3|4'"}",                   right: '1|2|3|4'},
+          {expr: "  [ABCDEF_GHIJK]     #{op}#{op_name == :op_empty ? '' : "   '5|6|7|8'      "}",     right: '5|6|7|8'},
+          {expr: "([ABCDEF_GHIJK] #{op}#{op_name == :op_empty ? '' : " '2|4|6'"})",                   right: '2|4|6'},
+          {expr: "  ([ABCDEF_GHIJK]   #{op}#{op_name == :op_empty ? '' : " 'a10'"} )    ",            right: 'a10'},
+          {expr: "((([ABCDEF_GHIJK] #{op}#{op_name == :op_empty ? '' : " 'Production|Services'"})))", right: 'Production|Services'},
+        ]
+
+        expression_structs.each do |struct|
+          example struct[:expr] do
+            expected = {
+              left: {factor: 'ABCDEF_GHIJK'},
+              op: {op_name => op},
+              right: {string: struct[:right]},
+            }
+            expected.delete(:right) if op_name == :op_empty # this is a postfix operation
+            expect(described_class.new(struct[:expr]).parse).to eq expected
+          end
+        end
+      end
+    end
+
+    context 'relational operators =>' do
+      {
+        '>'  => :op_gt,
+        '>=' => :op_ge,
+        '<'  => :op_lt,
+        '<=' => :op_le,
+        '='  => :op_eq,
+        '!=' => :op_ne,
+      }.each do |op, op_name|
+        expression_structs = [
+          {expr: "  ([foo]   #{op} '2.0' )    ", left:  {factor: 'foo'}, right: {float: 2.0}},
+          {expr: "  ([foo] #{op} 'a2.0' )    ",  left:  {factor: 'foo'}, right: {string: 'a2.0'}},
+          {expr: "  ('2.0'   #{op} [foo])    ",  right: {factor: 'foo'}, left:  {float: 2.0}},
+          {expr: "  ('a2.0' #{op} [foo])    ",   right: {factor: 'foo'}, left:  {string: 'a2.0'}},
+        ]
+
+        expression_structs.each do |struct|
+          example struct[:expr] do
+            expected = {
+              left: struct[:left],
+              op: {op_name => op},
+              right: struct[:right],
+            }
+            expect(described_class.new(struct[:expr]).parse).to eq expected
+          end
+        end
+      end
+    end
+
+    context 'IS operator =>' do
+      %w[NO_INFORMATION NOT_APPLICABLE NOT_COLLECTED NOT_DISCLOSED NOT_MEANINGFUL].each do |null_type|
+        [
+          "[bar] IS #{null_type}",
+          "  [bar]  IS  #{null_type}  ",
+          "([bar] IS #{null_type})",
+          "   ([bar]    IS  #{null_type})  ",
+        ].each do |expr|
+          example expr do
+            expected = {
+              left: {factor: 'bar'},
+              op: {op_is: 'IS'},
+              right: {null_value_type: null_type},
+            }
+            expect(described_class.new(expr).parse).to eq expected
+          end
+        end
+      end
+    end
+  
+    context 'IS NULL' do
+      let(:expected) {{
+        left: {factor: 'end_date'},
+        op: {op_is_null: 'IS NULL'},
+      }}
+      it { expect(described_class.new('[end_date] IS NULL').parse).to eq expected }
+    end
+
+    context 'IS NOT NULL' do
+      let(:expected) {{
+        left: {factor: 'baz'},
+        op: {op_is_not_null: 'IS NOT NULL'},
+      }}
+      it { expect(described_class.new('[baz] IS NOT NULL').parse).to eq expected }
+    end
+
+    context 'string relational operators' do
+      {
+        'CTN'  => :op_ctn,
+        'LCTN' => :op_ctn,
+        'STW'  => :op_stw,
+      }.each do |op, op_name|
+        context op do
+          [
+            {expr: "[foo] #{op} 'bar'", left: 'foo', right: 'bar'},
+            {expr: "[blat] #{op} 'bar  baz'", left: 'blat', right: 'bar  baz'},
+          ].each do |struct|
+            example struct[:expr] do
+              expected = {
+                left: {factor: struct[:left]},
+                op: {op_name => op},
+                right: {string: struct[:right]}
+              }
+              expect(described_class.new(struct[:expr]).parse).to eq expected
+            end
+          end
+        end
+      end
+    end
+
+    context 'float map operators' do
+      {
+        'ANY_GREATER_THAN_FLOAT_MAP'           => :op_float_map_any_gt,
+        'ALL_GREATER_THAN_FLOAT_MAP'           => :op_float_map_all_gt,
+        'NONE_GREATER_THAN_FLOAT_MAP'          => :op_float_map_none_gt,
+        'ANY_GREATER_THAN_OR_EQUAL_FLOAT_MAP'  => :op_float_map_any_ge,
+        'ALL_GREATER_THAN_OR_EQUAL_FLOAT_MAP'  => :op_float_map_all_ge,
+        'NONE_GREATER_THAN_OR_EQUAL_FLOAT_MAP' => :op_float_map_none_ge,
+        'ANY_LESS_THAN_FLOAT_MAP'              => :op_float_map_any_lt,
+        'ALL_LESS_THAN_FLOAT_MAP'              => :op_float_map_all_lt,
+        'NONE_LESS_THAN_FLOAT_MAP'             => :op_float_map_none_lt,
+        'ANY_LESS_THAN_OR_EQUAL_FLOAT_MAP'     => :op_float_map_any_le,
+        'ALL_LESS_THAN_OR_EQUAL_FLOAT_MAP'     => :op_float_map_all_le,
+        'NONE_LESS_THAN_OR_EQUAL_FLOAT_MAP'    => :op_float_map_none_le,
+        'ANY_EQUAL_FLOAT_MAP'                  => :op_float_map_any_eq,
+        'ALL_EQUAL_FLOAT_MAP'                  => :op_float_map_all_eq,
+        'NONE_EQUAL_FLOAT_MAP'                 => :op_float_map_none_eq,
+      }.each do |op, op_name|
+        context op do
+          [
+            {expr: "[foo] #{op} 'key:1.0'", left: 'foo', right: 'key:1.0'},
+            {expr: "[blat] #{op} 'key:0.4|key with space:0.1'", left: 'blat', right: 'key:0.4|key with space:0.1'},
+          ].each do |struct|
+            example struct[:expr] do
+              expected = {
+                left: {factor: struct[:left]},
+                op: {op_name => op},
+                right: {string: struct[:right]}
+              }
+              expect(described_class.new(struct[:expr]).parse).to eq expected
+            end
+          end
+        end
+      end
+    end
+
+    context 'string map operators' do
+      {
+        'ALL_MAP'  => :op_all_map,
+        'ANY_MAP'  => :op_any_map,
+        'NONE_MAP' => :op_none_map,
+      }.each do |op, op_name|
+        # [GSCaseIranRevShares] ANY_MAP 'Mineral Extraction Country:(10-100%]|Mineral Extraction Total:(10-100%]|Oil and Gas Country:(10-100%]|Oil and Gas Total:(10-100%]|Power Production Country:(10-100%]|Power Production Total:(10-100%]
+        context op do
+          [
+            {expr: "[foo] #{op} 'key:val'", left: 'foo', right: 'key:val'},
+            {expr: "[blat] #{op} 'key:val|key with space:val with space'", left: 'blat', right: 'key:val|key with space:val with space'},
+          ].each do |struct|
+            example struct[:expr] do
+              expected = {
+                left: {factor: struct[:left]},
+                op: {op_name => op},
+                right: {string: struct[:right]}
+              }
+              expect(described_class.new(struct[:expr]).parse).to eq expected
+            end
+          end
+        end
+      end
+    end
+  end
+
+  context '#parse' do
+    context 'complex queries' do
+      let(:expr) { %{(( ( ([Bar] = 'USD:100.0') OR ([Foo] IS NOT NULL) ) AND ([Dead] IS NOT_APPLICABLE) AND [Age] > '1'))} }
+      let(:expected) {{
+        lstatement: {
+          lstatement: {
+            lstatement:  {
+              left: {factor: "Bar"},
+              op: {op_eq: "="},
+              right: {currency_code: "USD", currency_value: {float: 100.0}},
+            },
+            boolean_operator: {op_or: "OR"},
+            rstatement: {
+              left: {factor: "Foo"},
+              op: {op_is_not_null: "IS NOT NULL"},
+            }
+          },
+          boolean_operator: {op_and: "AND"},
+          rstatement: {
+            left: {factor: "Dead"},
+            op: {op_is: "IS"},
+            right: {null_value_type: "NOT_APPLICABLE"},
+          }
+        },
+        boolean_operator: {op_and: "AND"},
+        rstatement: {
+          left: {factor: "Age"},
+          op: {op_gt: ">"},
+          right: {int: 1},
+        },
+      }}
+
+      example 'parens' do
+        expect(parser.parse).to eq expected
+      end
+
+      context 'long query' do
+        let(:expr)     { File.read spec_resource 'support/long-expr.txt' }
+        let(:expected) { YAML.load_file spec_resource 'support/long-expr.yml' }
+
+        example 'parens' do
+          expect(parser.parse).to eq(expected), 'generated parse tree was wrong'
+        end
+      end
+    end
+
+    context 'int currencies' do
+      let(:expr) { %{[CashBonus] > 'AUD:1000'} }
+        let(:expected) {{
+          left: {factor: 'CashBonus'},
+          op: {op_gt: '>'},
+          right: {currency_code: 'AUD', currency_value: {float: 1000.0}},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+    end
+
+    context 'float currencies' do
+      let(:expr) { %{[AnotherBonus] < 'GBP:10.1'} }
+        let(:expected) {{
+          left: {factor: 'AnotherBonus'},
+          op: {op_lt: '<'},
+          right: {currency_code: 'GBP', currency_value: {float: 10.1}},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+    end
+
+    context 'special markers' do
+      context 'quoted markers do not get expanded' do
+        context 'current year' do
+          let(:expr) { %{[Foo] > '$CURRENT_YEAR'} }
+          let(:expected) {{
+            left: {factor: 'Foo'},
+            op: {op_gt: '>'},
+            right: {string: '$CURRENT_YEAR'},
+          }}
+
+          it { expect(parser.parse).to eq expected }
+        end
+
+        context 'current date' do
+          let(:expr) { %{[Foo] > '$CURRENT_DATE'} }
+          let(:expected) {{
+            left: {factor: 'Foo'},
+            op: {op_gt: '>'},
+            right: {string: '$CURRENT_DATE'},
+          }}
+
+          it { expect(parser.parse).to eq expected }
+        end
+      end
+
+      context '$CURRENT_YEAR' do
+        let(:expr) { %{[Foo] > $CURRENT_YEAR} }
+        let(:expected) {{
+          left: {factor: 'Foo'},
+          op: {op_gt: '>'},
+          right: {special_marker: {current_year: '$CURRENT_YEAR'}},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context '$CURRENT_DATE' do
+        let(:expr) { %{[Bar] = $CURRENT_DATE} }
+        let(:expected) {{
+          left: {factor: 'Bar'},
+          op: {op_eq: '='},
+          right: {special_marker: {current_date: '$CURRENT_DATE'}},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'on date' do
+      let(:expr) { %{[Foo] ON '2011-01-01'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_date_on: 'ON'},
+        right: {string: '2011-01-01'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'on or after date' do
+      let(:expr) { %{[Foo] EPST '2013-01-02'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_date_after_or_on: 'EPST'},
+        right: {string: '2013-01-02'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'after date' do
+      let(:expr) { %{[Foo] PST '2017-10-13'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_date_after: 'PST'},
+        right: {string: '2017-10-13'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'on or before date' do
+      let(:expr) { %{[Foo] EPRE '2013-01-02'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_date_before_or_on: 'EPRE'},
+        right: {string: '2013-01-02'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'before date' do
+      let(:expr) { %{[Foo] PRE '2020-02-02'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_date_before: 'PRE'},
+        right: {string: '2020-02-02'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single string comparison' do
+      let(:expr) { %{[Foo] = 'Abc'} }
+      let(:expected) {{
+        left: {factor: 'Foo'},
+        op: {op_eq: '='},
+        right: {string: 'Abc'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single integer comparison' do
+      let(:expr) { %{[Bar] != '11'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_ne: '!='},
+        right: {int: 11},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single negative integer comparison' do
+      let(:expr) { %{[Bar] / '-5'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_divide: '/'},
+        right: {int: -5},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single postive integer comparison' do
+      let(:expr) { %{[Mod] % '+3'} }
+      let(:expected) {{
+        left: {factor: 'Mod'},
+        op: {op_mod: '%'},
+        right: {int: 3},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single float comparison' do
+      let(:expr) { %{[Bar] < '29.17'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_lt: '<'},
+        right: {float: 29.17},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single negative float comparison' do
+      let(:expr) { %{[Bar] + '-131711.0705'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_add: '+'},
+        right: {float: -131711.0705},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single positive float comparison' do
+      let(:expr) { %{[Pow] ^ '+1.5'} }
+      let(:expected) {{
+        left: {factor: 'Pow'},
+        op: {op_power: '^'},
+        right: {float: 1.5},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single scientific number comparison (E)' do
+      let(:expr) { %{[Bar] == '1.23E56'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_eq: '=='},
+        right: {float: 1.23E56},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single scientific number comparison (e)' do
+      let(:expr) { %{[Bar] = '1.3e-57'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_eq: '='},
+        right: {float: 1.3e-57},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'single negative scientific number comparison (e)' do
+      let(:expr) { %{[Bar] = '-1.5e-7'} }
+      let(:expected) {{
+        left: {factor: 'Bar'},
+        op: {op_eq: '='},
+        right: {float: -1.5e-7},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+  end
+
+  context 'subqueries' do
+    context 'with grouping' do
+      let(:expr) { "MIN {type: Issuer, fields: [oekomCarbonRiskRating]} GROUP BY [oekomIndustry]" }
+      let(:expected) {{
+        agg: {op_min: 'MIN'},
+        sub_query_fields: {factor: 'oekomCarbonRiskRating'},
+        sub_query_type: 'Issuer',
+        sub_query_grouping: {factor: 'oekomIndustry'},
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'with multiple subqueries' do
+      let(:a)        { "CNT{type:IssuerPerson, expression: #{a_expr}}" }
+      let(:a_expr)   { "[DirClassificationCO] IN 'IO|I-NED'" }
+      let(:b)        { "CNT{type:IssuerPerson, expression: #{b_expr}}" }
+      let(:b_expr)   { "[DirClassificationCO] != 'ND' AND [DirClassificationCO] IS NOT NULL" }
+      let(:expr)     { "#{a} / #{b}" }
+      let(:expected) {{
+        left: {
+          agg: {op_cnt: 'CNT'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: a_expr,
+        },
+        op: {op_divide: '/'},
+        right: {
+          agg: {op_cnt: 'CNT'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: b_expr,
+        }
+      }}
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'AVG' do
+      let(:field)    { 'Tenure' }
+      let(:filter)   { "[Tenure] IS NOT NULL" }
+      let(:sub_expr) { "type: IssuerPerson, fields: [#{field}], expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "AVG {#{sub_expr}}  >= '10.01'" }
+        let(:expected) {{
+          left: {
+            agg: {op_avg: 'AVG'},
+            sub_query_type: 'IssuerPerson',
+            sub_query_fields: {factor: field},
+            sub_query_expression: filter,
+          },
+          op: {op_ge: '>='},
+          right: {float: 10.01},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "AVG {#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_avg: 'AVG'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_fields: {factor: field},
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'CNT' do
+      let(:filter)   { "([CaseFlag] == 'Amber' AND [CaseFlag] == 'RED' AND [CaseFlag] == 'Green')" }
+      let(:sub_expr) { "type: IssuerCase, fields: [], expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "CNT {#{sub_expr}}  >= '0'" }
+        let(:expected) {{
+          left: {
+            agg: {op_cnt: 'CNT'},
+            sub_query_type: 'IssuerCase',
+            sub_query_expression: filter,
+          },
+          op: {op_ge: '>='},
+          right: {int: 0},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "CNT {#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_cnt: 'CNT'},
+          sub_query_type: 'IssuerCase',
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'EXISTS' do
+      let(:filter)   { "[ServesAsChairman] YES AND [ServesAsCEO] YES" }
+      let(:sub_expr) { "type:IssuerPerson, expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "EXISTS {#{sub_expr}} YES" }
+        let(:expected) {{
+          left: {
+            agg: {op_exists: 'EXISTS'},
+            sub_query_type: 'IssuerPerson',
+            sub_query_expression: filter,
+          },
+          yes_no_op: {op_yes: 'YES'},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "EXISTS{#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_exists: 'EXISTS'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'MAX' do
+      let(:field)    { 'oekomRating' }
+      let(:filter)   { "[oekomIndustry] IS NOT NULL" }
+      let(:sub_expr) { "type: Issuer, fields: [#{field}], expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "MAX {#{sub_expr}}= '1.3'" }
+        let(:expected) {{
+          left: {
+            agg: {op_max: 'MAX'},
+            sub_query_type: 'Issuer',
+            sub_query_fields: {factor: field},
+            sub_query_expression: filter,
+          },
+          op: {op_eq: '='},
+          right: {float: 1.3},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "MAX {#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_max: 'MAX'},
+          sub_query_type: 'Issuer',
+          sub_query_fields: {factor: field},
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'MED' do
+      let(:field)    { 'Age' }
+      let(:filter)   { "[LastName] IS NOT NULL" }
+      let(:sub_expr) { "type: Person, fields: [#{field}], expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "MED {#{sub_expr}}== '52'" }
+        let(:expected) {{
+          left: {
+            agg: {op_med: 'MED'},
+            sub_query_type: 'Person',
+            sub_query_fields: {factor: field},
+            sub_query_expression: filter,
+          },
+          op: {op_eq: '=='},
+          right: {int: 52},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "MED {#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_med: 'MED'},
+          sub_query_type: 'Person',
+          sub_query_fields: {factor: field},
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'MERGE' do
+      let(:sub_expr) { %{type: IssuerPerson, fields: [#{field}]} }
+      let(:field)    { 'IssuerDisclosedPersonSkills' }
+
+      context 'with comparison' do
+        let(:expr)     { "MERGE{#{sub_expr}} = 'Base Jumping|Rock Climbing'" }
+        let(:expected) {{
+          left: {
+            agg: {op_merge: 'MERGE'},
+            sub_query_type: 'IssuerPerson',
+            sub_query_fields: {factor: field},
+          },
+          op: {op_eq: '='},
+          right: {string: 'Base Jumping|Rock Climbing'},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "MERGE { #{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_merge: 'MERGE'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_fields: {factor: field},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'MIN' do
+      let(:field)    { 'Age' }
+      let(:filter)   { "[LastName] IS NOT NULL" }
+      let(:sub_expr) { "type: Person, fields: [#{field}], expression: #{filter}" }
+
+      context 'with comparison' do
+        let(:expr)     { "MIN {#{sub_expr}}<= '49'" }
+        let(:expected) {{
+          left: {
+            agg: {op_min: 'MIN'},
+            sub_query_type: 'Person',
+            sub_query_fields: {factor: field},
+            sub_query_expression: filter,
+          },
+          op: {op_le: '<='},
+          right: {int: 49},
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "MIN {#{sub_expr}}" }
+        let(:expected) {{
+          agg: {op_min: 'MIN'},
+          sub_query_type: 'Person',
+          sub_query_fields: {factor: field},
+          sub_query_expression: filter,
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'SUM' do
+      let(:sub_expr) { "type: IssuerPerson, fields: [DollarValueDirMatTransactions], expression: #{filter}" }
+      let(:filter)   { %{[ipAssociationType] == 'Executive'} }
+
+      context 'with comparison' do
+        let(:expr)     { "SUM {#{sub_expr}} != '135711.13719'" }
+        let(:expected) {{
+          left: {
+            agg: {op_sum: 'SUM'},
+            sub_query_fields: {factor: 'DollarValueDirMatTransactions'},
+            sub_query_type: 'IssuerPerson',
+            sub_query_expression: filter,
+          },
+          op: {op_ne: '!='},
+          right: {float: 135711.13719},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without comparison' do
+        let(:expr)     { "SUM { #{sub_expr} }" }
+        let(:expected) {{
+          agg: {op_sum: 'SUM'},
+          sub_query_fields: {factor: 'DollarValueDirMatTransactions'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: filter,
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'inline query' do
+      context 'math operation' do
+        let(:expr) { '{[A] / [B]}' }
+        let(:expected) {{
+          left: {factor: 'A'},
+          op: {op_divide: '/'},
+          right: {factor: 'B'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'math operation with comparison' do
+        let(:expr) { "{[B] * [C]} > '0'" }
+        let(:expected) {{
+          left: {
+            left: {factor: 'B'},
+            op: {op_multiply: '*'},
+            right: {factor: 'C'},
+          },
+          op: {op_gt: '>'},
+          right: {int: 0},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'comparison as boolean statement' do
+        let(:expr) { "{[C] < [A]} YES" }
+        let(:expected) {{
+          left: {factor: 'C'},
+          op: {op_lt: '<'},
+          right: {factor: 'A'},
+          yes_no_op: {op_yes: 'YES'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'negated comparison' do
+        let(:expr) { "NOT {[C] != [D]}" }
+        let(:expected) {{
+          op_not: 'NOT',
+          left: {factor: 'C'},
+          op: {op_ne: '!='},
+          right: {factor: 'D'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'deeply nested statements' do
+        let(:expr) { "{{[Foo] + [Bar]} = '0'} YES AND {{[Baz] ^ [Blat]} >= '25.0'} YES" }
+        let(:expected) {{
+          lstatement: {
+            left: {
+              left: {factor: 'Foo'},
+              op: {op_add: '+'},
+              right: {factor: 'Bar'},
+            },
+            op: {op_eq: '='},
+            right: {int: 0},
+            yes_no_op: {op_yes: 'YES'},
+          },
+          boolean_operator: {op_and: 'AND'},
+          rstatement: {
+            left: {
+              left: {factor: 'Baz'},
+              op: {op_power: '^'},
+              right: {factor: 'Blat'},
+            },
+            op: {op_ge: '>='},
+            right: {float: 25.0},
+            yes_no_op: {op_yes: 'YES'},
+          },
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'negated nested statements' do
+        let(:expr) { "NOT {{{[Foo] + [Bar]} = '0'} YES}" }
+        let(:expected) {{
+          op_not: 'NOT',
+          left: {
+            left: {factor: 'Foo'},
+            op: {op_add: '+'},
+            right: {factor: 'Bar'},
+          },
+          op: {op_eq: '='},
+          right: {int: 0},
+          yes_no_op: {op_yes: 'YES'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+  end
 
   context 'special marker' do
     %w[CURRENT_YEAR CURRENT_DATE].each do |marker|
       sym = marker.downcase.to_sym
 
       context 'in math expressions' do
-        it { expect(parser.parse_with_debug("($#{marker} - [BirthYear])")[:left][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("([BirthYear] - $#{marker})")[:right][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("[a] == (5 + $#{marker})")[:rstatement][:right][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("[a] < ($#{marker} * 2)")[:rstatement][:left][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("(5 + $#{marker}) > [b]")[:lstatement][:right][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("($#{marker} * 2) != [c]")[:lstatement][:left][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("($#{marker} * 2) / $#{marker}")[:lstatement][:left][:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("($#{marker} * 2) / $#{marker}")[:rstatement][:special_marker].keys).to eq [sym] }
+        let(:parser) { described_class.new expr }
+        let(:parsed) { parser.parse }
+
+        context "($#{marker} - [BirthYear])" do
+          let(:expr)     { "($#{marker} - [BirthYear])" }
+          let(:expected) {{
+            left: {special_marker: {sym => "$#{marker}"}},
+            op: {op_subtract: '-'},
+            right: {factor: 'BirthYear'},
+          }}
+          it { expect(parsed).to eq expected }
+        end
+
+        context "([BirthYear] - $#{marker})" do
+          let(:expr)     { "([BirthYear] - $#{marker})" }
+          let(:expected) {{
+            left: {factor: 'BirthYear'},
+            op: {op_subtract: '-'},
+            right: {special_marker: {sym => "$#{marker}"}},
+          }}
+          it { expect(parsed).to eq expected }
+        end
+
+        context "[a] == ('5' + $#{marker})" do
+          let(:expr)     { "[a] == ('5' + $#{marker})" }
+          let(:expected) {{
+            left: {factor: 'a'},
+            op: {op_eq: '=='},
+            right: {
+              left: {int: 5},
+              op: {op_add: '+'},
+              right: {special_marker: {sym => "$#{marker}"}},
+            },
+          }}
+          let(:previous_impl_expected) {{
+            lstatement: {value_of: {factor: 'a'}},
+            operator: {op: {op_eq: '=='}},
+            rstatement: {
+              left: {int: 5},
+              op_add: '+',
+              right: {special_marker: {sym => "$#{marker}"}},
+            },
+          }}
+          it { expect(parsed).to eq expected }
+        end
+
+        context "[a] < ($#{marker} * '2')" do
+          let(:expr)     { "[a] < ($#{marker} * '2')" }
+          let(:expected) {{
+            left: {factor: 'a'},
+            op: {op_lt: '<'},
+            right: {
+              left: {special_marker: {sym => "$#{marker}"}},
+              op: {op_multiply: '*'},
+              right: {int: 2},
+            },
+          }}
+          let(:previous_impl_expected) {{
+            lstatement: {value_of: {factor: 'a'}},
+            operator: {op: {op_lt: '<'}},
+            rstatement: {
+              left: {special_marker: {sym => "$#{marker}"}},
+              op_multiply: '*',
+              right: {int: 2},
+            },
+          }}
+          it { expect(parsed).to eq expected }
+        end
+
+        context "('5' * $#{marker}) > [b]" do
+          let(:expr)     { "('5' * $#{marker}) > [b]" }
+          let(:expected) {{
+            left: {
+              left: {int: 5},
+              op: {op_multiply: '*'},
+              right: {special_marker: {sym => "$#{marker}"}},
+            },
+            op: {op_gt: '>'},
+            right: {factor: 'b'},
+          }}
+          let(:previous_impl_expected) {{
+            lstatement: {
+              left: {int: 5},
+              op_multiply: '*',
+              right: {special_marker: {sym => "$#{marker}"}},
+            },
+            operator: {op: {op_gt: '>'}},
+            rstatement: {value_of: {factor: 'b'}},
+          }}
+          it { expect(parsed).to eq expected }
+        end
+
+        context "($#{marker} * '2') / $#{marker}" do
+          let(:expr)     { "($#{marker} * '2') / $#{marker}" }
+          let(:expected) {{
+            left: {
+              left: {special_marker: {sym => "$#{marker}"}},
+              op: {op_multiply: '*'},
+              right: {int: 2},
+            },
+            op: {op_divide: '/'},
+            right: {special_marker: {sym => "$#{marker}"}},
+          }}
+          let(:previous_impl_expected) {{
+            lstatement: {
+              left: {int: 5},
+              op_multiply: '*',
+              right: {special_marker: {sym => "$#{marker}"}},
+            },
+            math_operation: {op_divide: '/'},
+            rstatement: {special_marker: {sym => "$#{marker}"}},
+          }}
+          it { expect(parsed).to eq expected }
+        end
       end
 
       context 'in left position comparison' do
-        it { expect(parser.parse_with_debug("$#{marker} == [foo]")[:left][:special_marker].keys).to eq [sym] }
+        it { expect(described_class.new("$#{marker} == [foo]").parse[:left][:special_marker].keys).to eq [sym] }
       end
 
       context 'in right position comparison' do
-        it { expect(parser.parse_with_debug("[a] > $#{marker}")[:right][:special_marker].keys).to eq [sym] }
+        it { expect(described_class.new("[a] > $#{marker}").parse[:right][:special_marker].keys).to eq [sym] }
       end
 
       context 'by itself' do
-        it { expect(parser.parse_with_debug("$#{marker}")[:special_marker].keys).to eq [sym] }
-        it { expect(parser.parse_with_debug("(((((((($#{marker}))))))))")[:special_marker].keys).to eq [sym] }
+        it { expect(described_class.new("$#{marker}").parse[:special_marker].keys).to eq [sym] }
+        it { expect(described_class.new("(((((((($#{marker}))))))))").parse[:special_marker].keys).to eq [sym] }
       end
     end
   end
 
-  context 'edge cases' do
-    context 'regression: recursion errors' do
+  context 'single YES/NO factor' do
+    let(:parser)   { described_class.new expr }
+    let(:parsed)   { parser.parse }
+    let(:expr)     { '[YesOrNo] NO' }
+    let(:expected) {{
+      left: {factor: 'YesOrNo'},
+      yes_no_op: {op_no: 'NO'},
+    }}
 
-      context 'single YES/NO factor' do
-        let(:expr) { '[YesOrNo] NO' }
-
-        it { expect { parser.parse expr }.not_to raise_error }
-        it { expect(parser.parse(expr)).to have_key :left }
-        it { expect(parser.parse(expr)[:left]).to have_key :factor }
-        it { expect(parser.parse(expr)[:left][:factor].to_s).to eq 'YesOrNo' }
-      end
-
-      context 'boolean expression of YES/NO factors' do
-        let(:expr) { '[ServesAsChairman] YES AND [ServesAsCEO] YES' }
-
-        it { expect { parser.parse expr }.not_to raise_error }
-        it { expect(parser.parse expr).to have_key :boolean_operator }
-        it { expect(parser.parse expr).to have_key :lstatement }
-        it { expect(parser.parse expr).to have_key :rstatement }
-
-        {
-          lstatement: 'ServesAsChairman',
-          rstatement: 'ServesAsCEO',
-        }.each do |parse_tree_root, factor_name|
-          it { expect(parser.parse(expr)[parse_tree_root]).to have_key :left }
-          it { expect(parser.parse(expr)[parse_tree_root][:left]).to have_key :factor }
-          it { expect(parser.parse(expr)[parse_tree_root][:left][:factor].to_s).to eq factor_name }
-          it { expect(parser.parse(expr)[parse_tree_root]).to have_key :yes_no_op }
-          it { expect(parser.parse(expr)[parse_tree_root][:yes_no_op]).to have_key :op_yes }
-          it { expect(parser.parse(expr)[parse_tree_root][:yes_no_op][:op_yes].to_s).to eq 'YES' }
-        end
-      end
-    end
+    it { expect(parsed).to eq expected }
   end
 
-  context 'math' do
-    context "aggregations as math operands" do
-      context 'where left is an aggregation' do
-        let(:left) { "CNT{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'}" }
-        let(:right) { "[BoardSize]" }
+  context 'boolean expression of YES/NO factors' do
+    let(:parser)   { described_class.new expr }
+    let(:parsed)   { parser.parse }
+    let(:expr)     { '[ServesAsChairman] YES AND [ServesAsCEO] YES' }
+    let(:expected) {{
+      lstatement: {
+        left: {factor: 'ServesAsChairman'},
+        yes_no_op: {op_yes: 'YES'},
+      },
+      boolean_operator: {op_and: 'AND'},
+      rstatement: {
+        left: {factor: 'ServesAsCEO'},
+        yes_no_op: {op_yes: 'YES'},
+      },
+    }}
 
-        it { expect(parser.math_operand.parse_with_debug(left)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(left)[:agg].to_s).to eq '{:op_cnt=>"CNT"@0}' }
-        it { expect(parser.math_operand.parse_with_debug(left)[:sub_query_info].to_s).to eq %{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'} }
-        it { expect(parser.math_operand.parse_with_debug(right)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(right).values.first.to_s).to eq unfactorized[right] }
-      end
+    it { expect(parsed).to eq expected }
+  end
 
-      context 'where right is an aggregation' do
-        let(:left) { "[BoardSize]" }
-        let(:right) { "CNT{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'}" }
-
-        it { expect(parser.math_operand.parse_with_debug(left)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(left).values.first.to_s).to eq unfactorized[left] }
-        it { expect(parser.math_operand.parse_with_debug(right)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(right)[:agg].to_s).to eq '{:op_cnt=>"CNT"@0}' }
-        it { expect(parser.math_operand.parse_with_debug(right)[:sub_query_info].to_s).to eq %{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'} }
-      end
-
-      context 'where both sides are aggregations' do
-        let(:left) { "CNT{type:IssuerPerson, expression: [DirClassificationCO] == 'IO'}" }
-        let(:right) { "CNT{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'}" }
-
-        it { expect(parser.math_operand.parse_with_debug(left)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(left)[:agg].to_s).to eq '{:op_cnt=>"CNT"@0}' }
-        it { expect(parser.math_operand.parse_with_debug(left)[:sub_query_info].to_s).to eq %{type:IssuerPerson, expression: [DirClassificationCO] == 'IO'} }
-        it { expect(parser.math_operand.parse_with_debug(right)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(right)[:agg].to_s).to eq '{:op_cnt=>"CNT"@0}' }
-        it { expect(parser.math_operand.parse_with_debug(right)[:sub_query_info].to_s).to eq %{type:IssuerPerson, expression: [DirClassificationPAS] == 'Exec'} }
-      end
-    end
-
+  context 'various math operations' do
     operands = {
-      '1234'      => '7.0',
       '[factor1]' => '[factor2]',
       '[factor2]' => '[factor2]',
-      '[factor3]' => '4',
-      '2.9'       => '[factor]',
+      '[factor3]' => "'4'",
+      "'2.9'"     => '[factor]',
       '[factor4]' => %{AVG { type: Issuer, expression: [Foo] == 'bar' }},
-      '3.14'      => %{AVG { type: Issuer, expression: [Foo] == 'bar' }},
+      "'3.14'"    => %{AVG { type: Issuer, expression: [Foo] == 'bar' }},
     }
     operators = {
       '+' => :op_add,
@@ -158,546 +1265,12 @@ RSpec.describe DDQL::Parser do
       '%' => :op_mod,
       '^' => :op_power,
     }
-    let(:unfactorized) { lambda { |e| e.gsub(/[\[\]]/, '') } }
-
-    context 'math operands' do
-      operands.each do |left, right|
-        it { expect(parser.math_operand.parse_with_debug(left)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(right)).to be_a Hash }
-        it { expect(parser.math_operand.parse_with_debug(left).values.first.to_s).to eq unfactorized[left] }
-
-        if left == '[factor4]' || left == '3.14'
-          it { expect(parser.math_operand.parse_with_debug(right)).to be_a Hash }
-          it { expect(parser.math_operand.parse_with_debug(right)[:sub_query_info].to_s).to eq %{type: Issuer, expression: [Foo] == 'bar'} }
-        else
-          it { expect(parser.math_operand.parse_with_debug(right).values.first.to_s).to eq unfactorized[right] }
-        end
-      end
-    end
-
-    context 'math operation' do
-      operators.each do |op, op_name|
-        it { expect(parser.math_operation.parse_with_debug(op)).to be_a Hash }
-        it { expect(parser.math_operation.parse_with_debug(op)[op_name].to_s).to eq op }
-      end
-    end
-
     operands.each do |left, right|
-      operators.each do |op, op_name|
-        it "left should be #{left}" do
-          expect(parser.equation.parse_with_debug("#{left} #{op} #{right}")[:left].values.first.to_s).to eq unfactorized[left]
+      operators.each do |op, op_sym|
+        expr   = %{#{left} #{op} #{right}}
+        it %{parses <#{expr}>} do
+          expect { described_class.new(expr).parse }.not_to raise_error
         end
-
-        if left == '[factor4]' || left == '3.14'
-          it "knows the right is a hash in #{left} #{op} #{right}" do
-            expect(parser.parse_with_debug("#{left} #{op} #{right}")[:right]).to be_a Hash
-          end
-          it "parses the aggregation from #{left} #{op} #{right}" do
-            expect(parser.parse_with_debug("#{left} #{op} #{right}")[:right][:agg][:op_avg].to_s).to eq 'AVG'
-          end
-          it "parses the right from #{left} #{op} #{right}" do
-            expect(
-              parser.equation.parse_with_debug("#{left} #{op} #{right}")[:right][:sub_query_info].to_s
-            ).to eq %{type: Issuer, expression: [Foo] == 'bar'}
-          end
-        else
-          it "right should be #{right}" do
-            expect(parser.equation.parse_with_debug("#{left} #{op} #{right}")[:right].values.first.to_s).to eq unfactorized[right]
-          end
-        end
-
-        it "op_name should be #{op_name}" do
-          expect(parser.equation.parse_with_debug("#{left} #{op} #{right}")[op_name].to_s).to eq op
-        end
-
-        context 'parenthesized' do
-          it "left should be #{left}" do
-            expect(parser.parse_with_debug("(#{left} #{op} #{right})")[:left].values.first.to_s).to eq unfactorized[left]
-          end
-
-          if left == '[factor4]' || left == '3.14'
-            it "knows the right is a hash in (#{left} #{op} #{right})" do
-              expect(parser.parse_with_debug("(#{left} #{op} #{right})")[:right]).to be_a Hash
-            end
-            it "parses the aggregation from (#{left} #{op} #{right})" do
-              expect(parser.parse_with_debug("(#{left} #{op} #{right})")[:right][:agg][:op_avg].to_s).to eq 'AVG'
-            end
-            it "parses the right from (#{left} #{op} #{right})" do
-              expect(
-                parser.parse_with_debug("(#{left} #{op} #{right})")[:right][:sub_query_info].to_s
-              ).to eq %{type: Issuer, expression: [Foo] == 'bar'}
-            end
-          else
-            it "right should be #{right}" do
-              expect(parser.equation.parse_with_debug("#{left} #{op} #{right}")[:right].values.first.to_s).to eq unfactorized[right]
-            end
-          end
-
-          it "op_name should be #{op_name}" do
-            expect(parser.parse_with_debug("(#{left} #{op} #{right})")[op_name].to_s).to eq op
-          end
-        end
-      end
-    end
-  end
-
-  context 'factor' do
-    it { expect(parser.parse_with_debug('[abc]')[:value_of][:factor].to_s).to eq 'abc' }
-
-    it { expect(parser.factor.parse_with_debug('[abc]')[:factor].to_s).to eq 'abc' }
-    it { expect { parser.factor.parse('[]') }.to raise_error Parslet::ParseFailed }
-    it { expect { parser.factor.parse(' [AB cd] ') }.to raise_error Parslet::ParseFailed }
-
-    it { expect(parser.value.parse_with_debug('[abc]  ')[:factor].to_s).to eq 'abc' }
-    it { expect(parser.value.parse_with_debug('  [ZyXwVuT]')[:factor]).to eq 'ZyXwVuT' }
-    it { expect(parser.value.parse_with_debug(' [AB_cd] ')[:factor].to_s).to eq 'AB_cd' }
-  end
-
-  context 'IS NULL' do
-    it { expect(parser.statement.parse_with_debug('[foo] IS NULL')[:left][:factor].to_s).to eq 'foo' }
-    it { expect(parser.statement.parse_with_debug('[foo] IS NULL')[:op][:op_is_null].to_s).to eq 'IS NULL' }
-    it { expect(parser.statement.parse_with_debug('[end_date] IS NULL')[:left][:factor].to_s).to eq 'end_date' }
-    it { expect(parser.statement.parse_with_debug('[end_date] IS NULL')[:op][:op_is_null].to_s).to eq 'IS NULL' }
-  end
-
-  context 'IS NOT NULL' do
-    it { expect(parser.statement.parse_with_debug('[foo] IS NOT NULL')[:left][:factor].to_s).to eq 'foo' }
-    it { expect(parser.statement.parse_with_debug('[foo] IS NOT NULL')[:op][:op_is_not_null].to_s).to eq 'IS NOT NULL' }
-    it { expect(parser.statement.parse_with_debug('[end_date] IS NOT NULL')[:left][:factor].to_s).to eq 'end_date' }
-    it { expect(parser.statement.parse_with_debug('[end_date] IS NOT NULL').tap{|e| pp e}[:op][:op_is_not_null].to_s).to eq 'IS NOT NULL' }
-  end
-
-  context 'currency' do
-    {
-      USD: '0.0',
-      FOO: '-100.0',
-      BAR: '2.34',
-      GBP: '1.0e7',
-      AUD: '1.23e-3',
-      CHF: '9.01e+4',
-    }.each do |curr, str|
-      full_str = "#{curr}:#{str}"
-
-      [:currency, :value].each do |rule|
-        it "parses [#{full_str}] as a currency using rule[#{rule}]" do
-          expect(parser.send(rule).parse_with_debug(full_str)[:currency_value][:float].to_s).to eq str
-          expect(parser.send(rule).parse_with_debug(full_str)[:currency_code].to_s).to eq curr.to_s
-        end
-
-        it "parses ['#{full_str}'] as a currency using rule[#{rule}]" do
-          expect(parser.send(rule).parse_with_debug("'#{full_str}'")[:currency_value][:float].to_s).to eq str
-          expect(parser.send(rule).parse_with_debug("'#{full_str}'")[:currency_code].to_s).to eq curr.to_s
-        end
-      end
-
-      it "parses [    #{full_str}] as a currency using rule[value]" do
-        expect(parser.value.parse_with_debug("    #{full_str}")[:currency_value][:float].to_s).to eq str
-        expect(parser.value.parse_with_debug("    #{full_str}")[:currency_code].to_s).to eq curr.to_s
-      end
-
-      it "parses [#{full_str}   ] as a currency using rule[value]" do
-        expect(parser.value.parse_with_debug("#{full_str}   ")[:currency_value][:float].to_s).to eq str
-        expect(parser.value.parse_with_debug("#{full_str}   ")[:currency_code].to_s).to eq curr.to_s
-      end
-
-      it "parses [    '#{full_str}'] as a currency using rule[value]" do
-        expect(parser.value.parse_with_debug("    '#{full_str}'")[:currency_value][:float].to_s).to eq str
-        expect(parser.value.parse_with_debug("    '#{full_str}'")[:currency_code].to_s).to eq curr.to_s
-      end
-
-      it "parses ['#{full_str}'   ] as a currency using rule[value]" do
-        expect(parser.value.parse_with_debug("'#{full_str}'   ")[:currency_value][:float].to_s).to eq str
-        expect(parser.value.parse_with_debug("'#{full_str}'   ")[:currency_code].to_s).to eq curr.to_s
-      end
-
-      it "parses [ '#{full_str}'   ] as a currency using rule[value]" do
-        expect(parser.value.parse_with_debug(" '#{full_str}'   ")[:currency_value][:float].to_s).to eq str
-        expect(parser.value.parse_with_debug(" '#{full_str}'   ")[:currency_code].to_s).to eq curr.to_s
-      end
-    end
-  end
-
-  context 'date relational operators' do
-    date_relational_operators.each do |op, op_name|
-      context op do
-        [
-          {expr: "[foo] #{op} '05/01/2009'", left: 'foo', right: '05/01/2009'},
-          {expr: "[blat] #{op} '2001-03-24'", left: 'blat', right: '2001-03-24'},
-        ].each do |struct|
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:left][:factor].to_s).to eq struct[:left] }
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:op][op_name].to_s).to eq op }
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:right][:string]).to eq struct[:right] }
-        end
-      end
-    end
-  end
-
-  context 'string relational operators' do
-    string_relational_operators.each do |op, op_name|
-      context op do
-        [
-          {expr: "[foo] #{op} 'bar'", left: 'foo', right: 'bar'},
-          {expr: "[blat] #{op} 'bar  baz'", left: 'blat', right: 'bar  baz'},
-        ].each do |struct|
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:left][:factor].to_s).to eq struct[:left] }
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:op][op_name].to_s).to eq op }
-          it { expect(parser.statement.parse_with_debug(struct[:expr])[:right][:string]).to eq struct[:right] }
-        end
-      end
-    end
-  end
-
-  context 'string' do
-    it do
-      expect(parser.string.parse_with_debug("'The quick brown fox jumps over the lazy dog.'")[:string].to_s).to(
-        eq('The quick brown fox jumps over the lazy dog.'),
-      )
-    end
-    it do
-      expect(parser.value.parse_with_debug("'The quick brown fox jumps over the lazy dog.'")[:string].to_s).to(
-        eq('The quick brown fox jumps over the lazy dog.'),
-      )
-    end
-    it { expect(parser.string.parse_with_debug("'a'")[:string].to_s).to eq 'a' }
-    it { expect(parser.string.parse_with_debug("'1a'")[:string].to_s).to eq '1a' }
-    it { expect(parser.value.parse_with_debug("'a'")[:string].to_s).to eq 'a' }
-    it { expect(parser.value.parse_with_debug("'1a'")[:string].to_s).to eq '1a' }
-
-    it { expect(parser.string.parse_with_debug("''")[:string]).to be_empty }
-    it { expect(parser.string.parse_with_debug("'a'")[:string].to_s).to eq 'a' }
-    it { expect(parser.string.parse_with_debug("' AB cd '")[:string].to_s).to eq ' AB cd ' }
-
-    it { expect(parser.value.parse_with_debug("''")[:string]).to be_empty }
-    it { expect(parser.value.parse_with_debug("'a'")[:string].to_s).to eq 'a' }
-    it { expect(parser.value.parse_with_debug("' AB cd '")[:string].to_s).to eq ' AB cd ' }
-  end
-
-  context 'float' do
-    [
-      '0.0',
-      '-100.0',
-      '2.34',
-      '-1.912398',
-      '1.0e7',
-      '1.23e-3',
-      '9.01e+4',
-      '2.0E3',
-      '16.23E-3',
-      '329.01E+4',
-    ].each do |str|
-      it "parses [#{str}] as a float" do
-        expect(parser.float.parse_with_debug(str)[:float].to_s).to eq str
-      end
-
-      it "parses ['#{str}'] as a float" do
-        expect(parser.float.parse_with_debug("'#{str}'")[:float].to_s).to eq str
-      end
-
-      it "parses [#{str}] as a float from value" do
-        expect(parser.value.parse_with_debug(str)[:float].to_s).to eq str
-      end
-
-      it "parses [    #{str}] as a float from value" do
-        expect(parser.value.parse_with_debug("    #{str}")[:float].to_s).to eq str
-      end
-
-      it "parses [#{str}   ] as a float from value" do
-        expect(parser.value.parse_with_debug("#{str}   ")[:float].to_s).to eq str
-      end
-
-      it "parses ['#{str}'] as a float from value" do
-        expect(parser.value.parse_with_debug("'#{str}'")[:float].to_s).to eq str
-      end
-
-      it "parses [    '#{str}'] as a float from value" do
-        expect(parser.value.parse_with_debug("    '#{str}'")[:float].to_s).to eq str
-      end
-
-      it "parses ['#{str}'   ] as a float from value" do
-        expect(parser.value.parse_with_debug("'#{str}'   ")[:float].to_s).to eq str
-      end
-
-      it "parses [ '#{str}'   ] as a float from value" do
-        expect(parser.value.parse_with_debug(" '#{str}'   ")[:float].to_s).to eq str
-      end
-    end
-
-    it { expect { parser.float.parse('0') }.to raise_error Parslet::ParseFailed }
-  end
-
-  context 'int' do
-    ['0', '-100', '234', '-1912398', '2345252345'].each do |str|
-      it "parses [#{str}] as a int" do
-        expect(parser.int.parse_with_debug(str)[:int].to_s).to eq str
-      end
-
-      it "parses ['#{str}'] as a int" do
-        expect(parser.int.parse_with_debug("'#{str}'")[:int].to_s).to eq str
-      end
-
-      it "parses [#{str}] as an int from value" do
-        expect(parser.value.parse_with_debug(str)[:int].to_s).to eq str
-      end
-
-      it "parses [    #{str}] as an int from value" do
-        expect(parser.value.parse_with_debug("    #{str}")[:int].to_s).to eq str
-      end
-
-      it "parses [#{str}   ] as an int from value" do
-        expect(parser.value.parse_with_debug("#{str}   ")[:int].to_s).to eq str
-      end
-
-      it "parses ['#{str}'] as an int from value" do
-        expect(parser.value.parse_with_debug("'#{str}'")[:int].to_s).to eq str
-      end
-
-      it "parses [    '#{str}'] as an int from value" do
-        expect(parser.value.parse_with_debug("    '#{str}'")[:int].to_s).to eq str
-      end
-
-      it "parses ['#{str}'   ] as an int from value" do
-        expect(parser.value.parse_with_debug("'#{str}'   ")[:int].to_s).to eq str
-      end
-
-      it "parses [ '#{str}'   ] as an int from value" do
-        expect(parser.value.parse_with_debug(" '#{str}'   ")[:int].to_s).to eq str
-      end
-    end
-
-    it { expect { parser.int.parse('0.0') }.to raise_error Parslet::ParseFailed }
-  end
-
-  context 'statement =>' do
-    context 'array operators =>' do
-      array_operators.each do |str, op_name|
-        expression_structs = [
-          {expr: "[ABCDEF_GHIJK] #{str} '1|2|3|4'",                   right: '1|2|3|4'},
-          {expr: "  [ABCDEF_GHIJK]     #{str}   '5|6|7|8'      ",     right: '5|6|7|8'},
-          {expr: "([ABCDEF_GHIJK] #{str} '2|4|6')",                   right: '2|4|6'},
-          {expr: "  ([ABCDEF_GHIJK]   #{str} 'a10' )    ",            right: 'a10'},
-          {expr: "((([ABCDEF_GHIJK] #{str} 'Production|Services')))", right: 'Production|Services'},
-        ]
-
-        expression_structs.each do |struct|
-          context %{{#{struct[:expr]}}} do
-            let(:parsed_statement) do
-              stmt = parser.statement.parse_with_debug(struct[:expr])
-              stmt[:lstatement] || stmt
-            end
-
-            context 'op =>' do
-              it { expect(parsed_statement[:op][op_name]).not_to be_nil }
-            end
-
-            context 'left =>' do
-              it { expect(parsed_statement[:left][:factor].to_s).to eq 'ABCDEF_GHIJK' }
-            end
-
-            context 'right =>' do
-              it { expect(parsed_statement[:right][:string].to_s).to eq struct[:right] }
-            end
-          end
-        end
-      end
-    end
-
-    context 'relational operators =>' do
-      relational_operators.each do |str, op_name|
-        expression_structs = [
-          {expr: "1 #{str} 2",                    left: [:int, '1'],      right: [:int, '2']},
-          {expr: "  1     #{str}   2      ",      left: [:int, '1'],      right: [:int, '2']},
-          {expr: "(1 #{str} 2.9)",                left: [:int, '1'],      right: [:float, '2.9']},
-          {expr: "  ([foo]   #{str} '2.0' )    ", left: [:factor, 'foo'], right: [:float, '2.0']},
-          {expr: "  ([foo] #{str} 'a2.0' )    ",  left: [:factor, 'foo'], right: [:string, 'a2.0']},
-        ]
-
-        expression_structs.each do |struct|
-          context %{{#{struct[:expr]}}} do
-            let(:parsed_statement) { parser.statement.parse_with_debug(struct[:expr]) }
-
-            context 'op =>' do
-              it { expect(parsed_statement[:op][op_name]).not_to be_nil }
-            end
-
-            context 'left =>' do
-              let(:left) { struct[:left] }
-              it { expect(parsed_statement[:left][left.first].to_s).to eq left.last }
-            end
-
-            context 'right =>' do
-              let(:right) { struct[:right] }
-              it { expect(parsed_statement[:right][right.first].to_s).to eq right.last }
-            end
-          end
-        end
-      end
-    end
-
-    context 'IS operator =>' do
-      null_types.each do |null_type|
-        [
-          "[bar] IS #{null_type}",
-          "  [bar]  IS  #{null_type}  ",
-          "([bar] IS #{null_type})",
-          "   ([bar]    IS  #{null_type})  ",
-        ].each do |expr|
-          context %{{#{expr}}} do
-            let(:parsed_statement) do
-              statement = parser.statement.parse_with_debug(expr)
-              statement[:lstatement] || statement
-            end
-
-            context 'op =>' do
-              it { expect(parsed_statement[:op][:op_is].to_s).to eq 'IS' }
-            end
-
-            context 'left =>' do
-              it { expect(parsed_statement[:left][:factor].to_s).to eq 'bar' }
-            end
-
-            context 'right =>' do
-              it { expect(parsed_statement[:right][:null_value_type].to_s).to eq null_type }
-            end
-          end
-        end
-      end
-    end
-  end
-
-  context 'CNT' do
-    let(:expr) { "CNT {#{sub_expression}}  >= '0'" }
-    let(:filter) { "([CaseFlag] == 'Amber' AND [CaseFlag] == 'RED' AND [CaseFlag] == 'Green')" }
-    let(:parsed) { parser.aggregation_operator.parse expr }
-    let(:sub_expression) { "type: IssuerCase, fields: [], expression: #{filter}" }
-
-    it 'has the sub-expression' do
-      expect(parsed[:sub_query_info].to_s).to eq sub_expression
-    end
-
-    it 'has the relational operator' do
-      expect(parsed[:op][:op_ge]).not_to be_nil
-    end
-
-    it 'has the right-hand comparison value' do
-      expect(parsed[:right][:int].to_s).to eq '0'
-    end
-  end
-
-  context 'MAX' do
-    let(:expr) { "MAX {#{sub_expression}} GROUP BY [#{grouping_factor}]" }
-    let(:field) { 'oekomCarbonRiskRating' }
-    let(:grouping_factor) { 'oekomIndustry' }
-    let(:parsed) { parser.parse expr }
-    let(:sub_expr_parsed) { parser.sub_query_info_parsing.parse sub_query_info }
-    let(:sub_expression) { "type: Issuer, fields: [#{field}]" }
-    let(:sub_query_info) { parsed[:sub_query_info].to_s }
-
-    it 'has the sub-expression' do
-      expect(sub_query_info).to eq sub_expression
-    end
-
-    it 'has the grouping factor' do
-      expect(parsed[:group_by][:factor].to_s).to eq grouping_factor
-    end
-
-    it 'has the field in the subexpression' do
-      expect(sub_expr_parsed[:fields][:factor].to_s).to eq field
-    end
-  end
-
-  context 'top' do
-    context 'boolean expressions' do
-      let(:nested_not_expr)   { '([foo] = 1) AND NOT ([bar] = 2 OR [baz] = 3)' }
-      let(:nested_paren_expr) { '([foo] = 1) AND [bar] != 2' }
-      let(:paren_expr)        { '((( [foo] = 1 AND [bar] != 2 ) ) )' }
-      let(:simple_expr)       { '[foo] = 1 AND [bar] != 2' }
-      let(:simple_not_expr)   { '([foo] = 1) AND NOT [bar] = 2' }
-
-      let(:nested_not)   { parser.top.parse nested_not_expr }
-      let(:nested_paren) { parser.top.parse nested_paren_expr }
-      let(:paren)        { parser.top.parse paren_expr }
-      let(:simpl_not)    { parser.top.parse simple_not_expr }
-      let(:simple)       { parser.top.parse simple_expr }
-
-      shared_examples_for 'parsed expression' do
-        context 'boolean operator' do
-          it { expect(parsed_expr[:boolean_operator]).not_to be_nil }
-
-          context 'op_and' do
-            it { expect(parsed_expr[:boolean_operator][:op_and]).not_to be_nil }
-          end
-        end
-
-        context 'lstatement' do
-          it { expect(parsed_expr[:lstatement]).not_to be_nil }
-
-          context 'left' do
-            it { expect(parsed_expr[:lstatement][:left]).not_to be_nil }
-
-            context 'factor' do
-              it { expect(parsed_expr[:lstatement][:left][:factor]).not_to be_nil }
-            end
-          end
-
-          context 'op' do
-            it { expect(parsed_expr[:lstatement][:op]).not_to be_nil }
-
-            context 'op_eq' do
-              it { expect(parsed_expr[:lstatement][:op][:op_eq]).not_to be_nil }
-            end
-          end
-
-          context 'right' do
-            it { expect(parsed_expr[:lstatement][:right]).not_to be_nil }
-
-            context 'int' do
-              it { expect(parsed_expr[:lstatement][:right][:int]).not_to be_nil }
-            end
-          end
-        end
-
-        context 'rstatement' do
-          it { expect(parsed_expr[:rstatement]).not_to be_nil }
-
-          context 'left' do
-            it { expect(parsed_expr[:rstatement][:left]).not_to be_nil }
-
-            context 'factor' do
-              it { expect(parsed_expr[:rstatement][:left][:factor]).not_to be_nil }
-            end
-          end
-
-          context 'op' do
-            it { expect(parsed_expr[:rstatement][:op]).not_to be_nil }
-
-            context 'op_ne' do
-              it { expect(parsed_expr[:rstatement][:op][:op_ne]).not_to be_nil }
-            end
-          end
-
-          context 'right' do
-            it { expect(parsed_expr[:rstatement][:right]).not_to be_nil }
-
-            context 'int' do
-              it { expect(parsed_expr[:rstatement][:right][:int]).not_to be_nil }
-            end
-          end
-        end
-      end
-
-      context 'simple expr' do
-        let(:parsed_expr) { simple }
-        it_behaves_like 'parsed expression'
-      end
-
-      context 'parenthetical expr' do
-        let(:parsed_expr) { paren }
-        it_behaves_like 'parsed expression'
-      end
-
-      context 'nested parenthetical expr' do
-        let(:parsed_expr) { nested_paren }
-        it_behaves_like 'parsed expression'
       end
     end
   end
