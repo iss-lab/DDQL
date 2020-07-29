@@ -2,6 +2,8 @@
 sudo: false
 language: ruby
 cache: bundler
+env:
+  - JRUBY_OPTS="-J-Xss8m"
 rvm:
   - 2.5
   - 2.6
