@@ -392,6 +392,10 @@ module DDQL
         trimming!
       end
 
+      def as_hash(data)
+        {screen: data.split('#').last.to_i}
+      end
+
       def expression?
         true
       end

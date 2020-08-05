@@ -1274,4 +1274,27 @@ describe DDQL::Parser do
       end
     end
   end
+
+  context 'screens' do
+    let(:sub_expr) { %{[screen##{screen_id}]} }
+
+    context 'with comparison' do
+      let(:expr)      { "#{sub_expr} YES" }
+      let(:screen_id) { 12345 }
+      let(:expected)  {{
+        left: {
+          screen: screen_id,
+        },
+        yes_no_op: {op_yes: 'YES'},
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'without comparison' do
+      let(:expr)      { sub_expr }
+      let(:expected)  { {screen: screen_id,} }
+      let(:screen_id) { 98765 }
+      it { expect(parser.parse).to eq expected }
+    end
+  end
 end
