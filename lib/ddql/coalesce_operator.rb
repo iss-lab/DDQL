@@ -13,13 +13,12 @@ module DDQL
       end
 
       left_factor, right_factor = expression[:string].split('|', 2)
+
       {
-        op_coalesce: {
-          factors: {
-            left_factor: {factor: left_factor},
-            right_factor: {factor: right_factor},
-          },
-        }
+        op_coalesce: [
+          {factor: left_factor},
+          {factor: right_factor},
+        ]
       }
     end
   end

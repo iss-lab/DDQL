@@ -1,6 +1,10 @@
 module DDQL
   module StringRefinements
     refine String do
+      def blank?
+        empty? || strip.empty?
+      end
+
       def squish
         self.dup.squish!
       end

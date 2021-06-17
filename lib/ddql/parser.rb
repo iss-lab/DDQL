@@ -1,5 +1,7 @@
 module DDQL
   class Parser
+    attr_reader :tokens
+
     class ParseException < StandardError
     end
 
@@ -9,10 +11,51 @@ module DDQL
       end
     end
 
-    def initialize(expression)
+    class ResolvedToken
+      attr_reader :value
+
+      def initialize(v)
+        @value = v
+      end
+
+      def parse(_)
+        value
+      end
+    end
+
+    def self.from_tokens(tokens)
+      opener = tokens.doubly_linked!.find { |node| node.value.type == TokenType::NESTED_OPENER }
+      if opener
+        closer = tokens.find_from_tail { |node| node.value.type == TokenType::NESTED_CLOSER }
+        new_tokens  = DDQL::LinkedList.new
+        current = opener
+        while (current = current.next) && !(current === closer)
+          new_tokens << current.dup
+        end
+        new_tokens.tail.next = nil
+        new(tokens: tokens.replace!(
+          from: opener,
+          to: closer,
+          with: ResolvedToken.new(sub_query: from_tokens(new_tokens).parse)),
+        )
+      else
+        new(tokens: tokens)
+      end
+    end
+
+    def self.parse(expr)
+      from_tokens(Lexer.lex(expr)).record_expression(expr).parse
+    end
+
+    def initialize(expression: nil, tokens: nil)
       @expression = expression
-      @tokens     = Lexer.lex(expression)
       @depth      = 0
+      if expression
+        @tokens = Lexer.lex(expression)
+      else
+        @tokens = tokens
+      end
+      raise "tokens cannot be determined" if @tokens.nil? || @tokens.empty?
     end
 
     def consume(token_type)
@@ -31,6 +74,7 @@ module DDQL
     def parse(precedence: 0)
       @depth += 1
       token   = @tokens.poll
+
       raise NoTokenException if token.nil?
 
       expression = token.parse(self)
@@ -49,6 +93,28 @@ module DDQL
 
     def peek
       @tokens.peek
+    end
+
+    def record_expression(expr)
+      @expression = expr
+      self
+    end
+
+    # supports reading until the next +token_type+, does not support
+    # nested reads of +token_type+
+    #
+    # @raise [RuntimeError] if +token_type+ is not found
+    # @return [LinkedList<Token>] tokens exclusive of the final token_type
+    def until(token_type)
+      new_list = LinkedList.new.doubly_linked!
+      while token = @tokens.poll
+        if token.type?(token_type)
+          return new_list
+        else
+          new_list << token
+        end
+      end
+      raise "expected to consume tokens up to type[#{token_type.name}]"
     end
 
     private

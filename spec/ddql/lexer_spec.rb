@@ -132,7 +132,7 @@ describe DDQL::Lexer do
   end
 
   context 'postfixes' do
-    DDQL::Operators.instance.cache.select{ |k, v| v.type == :postfix }.keys.each do |postfix|
+    DDQL::Operators.instance.cache.select{ |_k, v| v.type == :postfix && v.name !~ /Nested Query/ }.keys.each do |postfix|
       example "matches #{postfix}" do
         expr   = "[FooBar] #{postfix}"
         tokens = DDQL::Lexer.lex(expr)
@@ -143,7 +143,7 @@ describe DDQL::Lexer do
   end
 
   context 'prefixes' do
-    DDQL::Operators.instance.cache.select{ |k, v| v.type == :prefix }.keys.each do |prefix|
+    DDQL::Operators.instance.cache.select{ |_k, v| v.type == :prefix && v.name !~ /Nested Query/ }.keys.each do |prefix|
       example "matches #{prefix}" do
         expr   = "#{prefix} { fields: [Foobar], type: Issuer, expression: [ipAssociationType] == 'Director' }"
         tokens = DDQL::Lexer.lex(expr)

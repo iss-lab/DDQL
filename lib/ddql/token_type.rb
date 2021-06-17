@@ -1,13 +1,15 @@
 module DDQL
   class TokenType
-    using StringRefinements
-
     attr_reader :label, :name, :pattern
 
+    using ::DDQL::StringRefinements
+
     FACTOR_PATTERN = /\[[^\]]+\]/
+    NESTED_OPEN_PATTERN = '‹'
+    NESTED_CLOSE_PATTERN = '›'
 
     def self.all_types_pattern
-      Regexp.compile(ALL.map { |tt| "(?<#{tt.name}>#{tt.pattern})" }.join('|'))
+      @pattern ||= Regexp.compile(ALL.map { |tt| "(?<#{tt.name}>#{tt.pattern})" }.join('|'))
     end
 
     def initialize(name:, pattern:, &block)
@@ -19,16 +21,12 @@ module DDQL
       @value_transformer = block
     end
 
+    def ==(other)
+      name == other.name
+    end
+
     def as_hash(data)
-      # case name
-      # when :string_literal; {right: {string: data}}
-      # when :integer_literal; {right: {int: data}}
-      # when :numeric_literal, :sci_num_literal; {right: {float: data}}
-      # # when :lparen; {lstatement: data}
-      # when :rparen; Hash.new
-      # else
-        raise "subclass responsibility name[#{name}] data[#{data}]"
-      # end
+      raise "subclass responsibility name[#{name}] data[#{data}]"
     end
 
     def comparison?(data)
@@ -96,6 +94,10 @@ module DDQL
       self
     end
 
+    def supports_post_processing?
+      false
+    end
+
     def trimming!(range=(1..-2))
       @data_range = range
       self
@@ -110,7 +112,6 @@ module DDQL
       end
 
       def as_hash(data)
-        # {right: {data_type => data}}
         {data_type => data}
       end
 
@@ -125,7 +126,7 @@ module DDQL
 
     class Currency < Literal
       def initialize
-        super(name: :currency, pattern: /'(?!')(?<code>[A-Z]{3}):(\d+\.?\d+)'/)
+        super(name: :currency, pattern: /'(?!')(?<code>[A-Z]{3}):(\d+\.?\d*)'/)
         @value_transformer = lambda do |s|
           s = s.split(':', 2)
           {currency_code: s.first, currency_value: {float: s.last.to_f}}
@@ -133,14 +134,13 @@ module DDQL
       end
 
       def as_hash(data)
-        # {right: data}
         data
       end
     end
 
     class Integer < Literal
       def initialize
-        super(name: :integer, pattern: /'(?!')(?>[+-]?)(\d+)'/)
+        super(name: :integer, pattern: /'(?!['0])(?>[+-]?)(\d+)'/)
         @value_transformer = -> (s) { s.to_i }
       end
 
@@ -151,7 +151,7 @@ module DDQL
 
     class Numeric < Literal
       def initialize
-        super(name: :numeric, pattern: /'(?!')((?>[+-]?)(?>(?>\d+)(?>\.?)(?>\d*)|(?>\d*)(?>\.?)(?>\d+)))'/)
+        super(name: :numeric, pattern: /'((?!('|0\d)))((?>[+-]?)(?>(?>\d*)(?>\.?)(?>\d+)))'/)
         @value_transformer = -> (s) { s.to_f }
       end
 
@@ -162,7 +162,7 @@ module DDQL
 
     class ScientificNumeric < Literal
       def initialize
-        super(name: :sci_num, pattern: /'(?!')([+-]?\d(\.\d+)?[Ee][+-]?[^0]\d+)'/)
+        super(name: :sci_num, pattern: /'(?!('|0\d))([+-]?\d(\.\d+)?[Ee][+-]?\d+)'/)
         @value_transformer = -> (s) { s.to_f }
       end
 
@@ -192,6 +192,14 @@ module DDQL
         @value_transformer = -> (s) { s.gsub('\\', '') }
       end
 
+      def as_hash(data)
+        if data&.strip.each_byte.all? { |e| e == 0x30 }
+          Integer.new.as_hash(data.to_i)
+        else
+          super
+        end
+      end
+
       def data_type
         name
       end
@@ -206,7 +214,6 @@ module DDQL
       end
 
       def as_hash(data)
-        # {left: {name => data}}
         {name => data}
       end
 
@@ -229,9 +236,9 @@ module DDQL
         true
       end
 
-      def parse(parser, token, expression: nil)
+      def parse(parser, _token, expression: nil)
         new_expression = parser.parse
-        parser.consume TokenType::RPAREN #if parser.peek&.data == ')'
+        parser.consume TokenType::RPAREN
 
         if expression.nil?
           next_token = parser.peek
@@ -280,7 +287,7 @@ module DDQL
 
       def parse(parser, token, expression: nil)
         operator = Operators.instance.cache[token.op_data]
-        if expression.nil? && !operator.prefix?
+        if expression.nil? && !operator&.prefix?
           raise "expected op[#{operator&.name}] to be part of an expression"
         end
         operator.parse(parser, token, expression: expression)
@@ -291,6 +298,7 @@ module DDQL
       end
 
       protected
+
       def op_symbol(data)
         float_map_ops = Operators.float_map_ops
 
@@ -405,6 +413,28 @@ module DDQL
       end
     end
 
+    class NestedQuery < TokenType
+      def initialize
+        super(name: :nested_opener, pattern: Regexp.compile(Regexp.escape TokenType::NESTED_OPEN_PATTERN))
+        trimming!
+      end
+
+      def as_hash(data)
+        require 'pry'; binding.pry
+        {screen: data.split('#').last.to_i}
+      end
+
+      def expression?
+        true
+      end
+
+      def parse(parser, token, expression: nil)
+        require 'pry'; binding.pry
+        nested_parser = parser.class.from_tokens(parser.until(TokenType::NESTED_CLOSER))
+        nested_parser.parse
+      end
+    end
+
     class SubQuery < TokenType
       def initialize
         super(name: :lbrace, pattern: /\{/)
@@ -414,14 +444,11 @@ module DDQL
         true
       end
 
-      def parse(parser, token, expression: nil)
+      def parse(parser, _token, expression: nil)
         new_expression = parser.parse
-        if parser.peek&.type == TokenType::SUB_Q_GROUP
-          token = parser.consume TokenType::SUB_Q_GROUP
-          new_expression.merge!(token.parse(parser, expression: new_expression))
+        if parser.peek&.supports_post_processing?
+          _token, new_expression = parser.peek.post_process(parser: parser, expression: new_expression)
         end
-
-        parser.consume TokenType::RBRACE if parser.peek&.type == TokenType::RBRACE
 
         if expression.nil?
           next_token = parser.peek
@@ -438,9 +465,43 @@ module DDQL
       end
     end
 
+    class SubQueryAlias < TokenType
+      def initialize
+        super(name: :sub_query_alias, pattern: /AS\s+(?<sub_query_alias>#{FACTOR_PATTERN})/)
+        trimming!
+      end
+
+      def as_hash(data)
+        factor, desc = data.split(':', 2)
+        desc = factor unless desc
+        {name => {factor: factor, desc: desc}}
+      end
+
+      def parse(parser, token, expression: nil)
+        if expression.nil?
+          raise 'expected AS to be part of an ALIAS expression'
+        end
+        if expression && expression.key?(:sub_query_expression)
+          expression[:sub_query] = parser.class.parse(expression[:sub_query_expression])
+          expression.delete :sub_query_expression
+        end
+        expression.merge(as_hash(token.data))
+      end
+
+      def post_process(parser:, expression:)
+        token = parser.consume TokenType::SUB_Q_ALIAS
+        new_expression = expression.merge!(token.parse(parser, expression: expression))
+        [token, new_expression]
+      end
+
+      def supports_post_processing?
+        true
+      end
+    end
+
     class SubQueryExpression < TokenType
       def initialize
-        super(name: :sub_query_expression, pattern: /expression:\s*(?<sub_query_expression>[^\{\}]{5,})\s*,?\s*/)
+        super(name: :sub_query_expression, pattern: /expression:\s*(?<sub_query_expression>[^\{\}#{Regexp.escape(TokenType::NESTED_OPEN_PATTERN)}#{Regexp.escape(TokenType::NESTED_CLOSE_PATTERN)}]{5,})\s*,?\s*/)
       end
 
       def as_hash(data)
@@ -448,10 +509,16 @@ module DDQL
       end
 
       def parse(parser, token, expression: nil)
+        data = token.data.strip
+        if data.start_with? TokenType::NESTED_OPEN_PATTERN
+          sub_data = data[1..(data.index(TokenType::NESTED_CLOSE_PATTERN))]
+          data = parser.class.parse sub_data
+        end
+
         if expression.nil? || expression.keys != %i[agg sub_query_fields sub_query_type]
-          as_hash(token.data.strip).merge parser.parse
+          as_hash(data).merge parser.parse
         else
-          expression.merge(as_hash(token.data.strip))
+          expression.merge(as_hash(data))
         end
       end
     end
@@ -491,6 +558,16 @@ module DDQL
         end
         expression.merge(as_hash(token.data))
       end
+
+      def post_process(parser:, expression:)
+        token = parser.consume TokenType::SUB_Q_GROUP
+        new_expression = expression.merge!(token.parse(parser, expression: expression))
+        [token, new_expression]
+      end
+
+      def supports_post_processing?
+        true
+      end
     end
 
     class SubQueryType < TokenType
@@ -519,8 +596,19 @@ module DDQL
       def as_hash(_data)
         Hash.new
       end
+
+      def post_process(parser:, expression:)
+        token = parser.consume TokenType::RBRACE
+        [token, expression]
+      end
+
+      def supports_post_processing?
+        true
+      end
     end
 
+    NESTED_OPENER    = NestedQuery.new
+    NESTED_CLOSER    = new(name: :nested_closer, pattern: Regexp.compile(Regexp.escape TokenType::NESTED_CLOSE_PATTERN))
     LPAREN           = Group.new
     RPAREN           = new(name: :rparen, pattern: /(?=[^%])\)/)
     LBRACE           = SubQuery.new #new(name: :lbrace, pattern: /\{/)
@@ -539,7 +627,7 @@ module DDQL
     PREFIXOPERATOR   = PrefixOperator.new
     INFIXOPERATOR    = InfixOperator.new
     POSTFIXOPERATOR  = PostfixOperator.new
-    # QUERY            = Query.new
+    SUB_Q_ALIAS      = SubQueryAlias.new
     SUB_Q_EXPR       = SubQueryExpression.new
     SUB_Q_FIELDS     = SubQueryFields.new
     SUB_Q_GROUP      = SubQueryGrouping.new
@@ -547,15 +635,20 @@ module DDQL
     WHITESPACE       = new(name: :whitespace, pattern: /[\s]/).skipping!
 
     ALL = [
+      NESTED_OPENER,
+      NESTED_CLOSER,
       LPAREN,
       RPAREN,
       # LCAPTURE,
       # RCAPTURE,
+      # NESTED_OPENER,
+      # NESTED_CLOSER,
       LBRACE,
       RBRACE,
       SUB_Q_EXPR,
       SUB_Q_FIELDS,
       SUB_Q_TYPE,
+      SUB_Q_ALIAS,
       SUB_Q_GROUP,
       CURRENCY_LITERAL,
       SCI_NUM_LITERAL,
@@ -568,7 +661,6 @@ module DDQL
       PREFIXOPERATOR,
       INFIXOPERATOR,
       POSTFIXOPERATOR,
-      # QUERY, # TODO: do we need this?
       WHITESPACE,
     ]
   end

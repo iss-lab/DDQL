@@ -1,15 +1,18 @@
 module DDQL
   class Operator
-    attr_reader :associativity, :symbol, :name, :type, :precedence, :return_type, :ordinal
+    attr_reader :associativity, :symbol, :name, :type, :precedence, :return_type
 
-    def initialize(symbol, name, type, precedence, right, return_type, ordinal=0)
+    def initialize(symbol, name, type, precedence, right, return_type)
       @symbol        = symbol
       @name          = name
       @type          = type
       @precedence    = precedence
       @associativity = right ? :right : :left
       @return_type   = return_type
-      @ordinal       = ordinal
+    end
+
+    def any_type?
+      return_type == :any
     end
 
     def boolean?
@@ -118,9 +121,13 @@ module DDQL
 
     def parse_infix(parser, token, expression)
       precedence      = self.precedence
-      precedence     -= 1 if right?
+      precedence     -= 0.05 if right?
       next_expression = parser.parse(precedence: precedence)
       op_expression   = token.as_hash
+
+      if math? && next_expression&.dig(:left, :factor) && next_expression.size == 1
+        return op_expression.merge(left: expression, right: next_expression[:left])
+      end
 
       if token.and? || token.or?
         return boolean_stmt(expression, op_expression, next_expression)
@@ -162,6 +169,9 @@ module DDQL
         next_expression = next_expression[:lstatement]
       elsif next_expression.key?(:rstatement) && !next_expression.key?(:lstatement)
         next_expression = next_expression[:rstatement]
+      elsif op_expression[:op].key?(:op_not) && next_expression.key?(:op_not)
+        next_expression.delete(:op_not)
+        return next_expression
       end
       op_expression[:op].merge(next_expression)
     end

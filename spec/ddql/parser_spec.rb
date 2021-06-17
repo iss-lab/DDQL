@@ -1,7 +1,136 @@
-require 'yaml'
-
 describe DDQL::Parser do
-  let(:parser) { described_class.new expr }
+  using ::DDQL::StringRefinements
+
+  let(:parser) { described_class.from_tokens DDQL::Lexer.lex expr }
+
+  context 'Regressions' do
+    context 'Aggregation with multi-part boolean expression' do
+      context 'with wrapping' do
+        let(:expr)     { "CNT {type: IssuerPerson, fields: [], expression: ([PowGenRevShareMax] >= '0.5')} > '0' AND (([ipAssociationType] == 'Director') AND ([issuer_id] == '15'))" }
+        let(:expected) {{
+          lstatement: {
+            left: {
+              agg: { op_cnt: 'CNT' },
+              sub_query_expression: "([PowGenRevShareMax] >= '0.5')",
+              sub_query_type: 'IssuerPerson',
+            },
+            op: { op_gt: '>' },
+            right: { int: 0 },
+          },
+          boolean_operator: {op_and: 'AND'},
+          rstatement: {
+            lstatement: {
+              left: { factor: 'ipAssociationType' },
+              op: { op_eq: '==' },
+              right: { string: 'Director' },
+            },
+            boolean_operator: {op_and: 'AND'},
+            rstatement: {
+              left: { factor: 'issuer_id' },
+              op: { op_eq: '==' },
+              right: { int: 15 },
+            },
+          },
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'without wrapping' do
+        let(:expr) { "CNT {type: IssuerPerson, fields: [], expression: ([PowGenRevShareMax] >= '0.5')} > '0' AND ([ipAssociationType] == 'Director') AND ([issuer_id] == '15')" }
+        let(:expected) {{
+          lstatement: {
+            lstatement: {
+              left: {
+                agg: { op_cnt: 'CNT' },
+                sub_query_expression: "([PowGenRevShareMax] >= '0.5')",
+                sub_query_type: 'IssuerPerson',
+              },
+              op: { op_gt: '>' },
+              right: { int: 0 },
+            },
+            boolean_operator: {op_and: 'AND'},
+            rstatement: {
+              left: { factor: 'ipAssociationType' },
+              op: { op_eq: '==' },
+              right: { string: 'Director' },
+            },
+          },
+          boolean_operator: {op_and: 'AND'},
+          rstatement: {
+            left: { factor: 'issuer_id' },
+            op: { op_eq: '==' },
+            right: { int: 15 },
+          },
+        }}
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
+    context 'DD-6806' do
+      let(:expr) {
+        "(
+           [ClimateScienceBasedTargets] != 'Committed'
+           AND [ClimateScienceBasedTargets] != 'Concrete Target'
+           AND [CarbonRRGHGTargetPlansGrade] < '1.5'
+           AND [CarbonRRRiskClass] < '2'
+           AND [CarbonRRPerformanceScore] < '1.5'
+           AND (
+             [ClimateTotalEmissionsIntUSD] / [ClimateAvePeerEmissionsIntUSD] > '1.2'
+           )
+         )"
+      }
+      let(:expected) {{
+        :boolean_operator=>{:op_and=>"AND"},
+        :lstatement=>{
+          :boolean_operator=>{:op_and=>"AND"},
+          :lstatement=>{
+            :boolean_operator=>{:op_and=>"AND"},
+            :lstatement=>{
+              :boolean_operator=>{:op_and=>"AND"},
+              :lstatement=>{
+                :boolean_operator=>{:op_and=>"AND"},
+                :lstatement=>{
+                  :left=>{:factor=>"ClimateScienceBasedTargets"},
+                  :op=>{:op_ne=>"!="},
+                  :right=>{:string=>"Committed"},
+                },
+                :rstatement=>{
+                  :left=>{:factor=>"ClimateScienceBasedTargets"},
+                  :op=>{:op_ne=>"!="},
+                  :right=>{:string=>"Concrete Target"},
+                },
+              },
+              :rstatement=>{
+                :left=>{:factor=>"CarbonRRGHGTargetPlansGrade"},
+                :op=>{:op_lt=>"<"},
+                :right=>{:float=>1.5},
+              },
+            },
+            :rstatement=>{
+              :left=>{:factor=>"CarbonRRRiskClass"},
+              :op=>{:op_lt=>"<"},
+              :right=>{:int=>2},
+            },
+          },
+          :rstatement=>{
+            :left=>{:factor=>"CarbonRRPerformanceScore"},
+            :op=>{:op_lt=>"<"},
+            :right=>{:float=>1.5},
+          },
+        },
+        :rstatement=>{
+          :left=>{
+            :left=>{:factor=>"ClimateTotalEmissionsIntUSD"},
+            :op=>{:op_divide=>"/"},
+            :right=>{:factor=>"ClimateAvePeerEmissionsIntUSD"},
+          },
+          :op=>{:op_gt=>">"},
+          :right=>{:float=>1.2}
+        }
+      }}
+      it { expect(parser.parse).to eq expected }
+    end
+  end
 
   context 'COALESCE' do
     let(:a_factor) { 'ViolentVideoGamesInvolvementFund' }
@@ -12,12 +141,10 @@ describe DDQL::Parser do
       let(:expr)     { "#{sub_expr} ANY 'Production'" }
       let(:expected) {{
         left: {
-          op_coalesce: {
-            factors: {
-              left_factor: {factor: a_factor},
-              right_factor: {factor: b_factor},
-            },
-          },
+          op_coalesce: [
+            {factor: a_factor},
+            {factor: b_factor},
+          ],
         },
         op: {op_any: 'ANY'},
         right: {string: 'Production'},
@@ -28,12 +155,10 @@ describe DDQL::Parser do
     context 'without comparison' do
       let(:expr)     { sub_expr }
       let(:expected) {{
-        op_coalesce: {
-          factors: {
-            left_factor: {factor: a_factor},
-            right_factor: {factor: b_factor},
-          },
-        },
+        op_coalesce: [
+          {factor: a_factor},
+          {factor: b_factor},
+        ],
       }}
       it { expect(parser.parse).to eq expected }
     end
@@ -48,12 +173,17 @@ describe DDQL::Parser do
       let(:expr)     { "#{sub_expr} = 'Acme Corp.'" }
       let(:expected) {{
         left: {
-          left: {factor: str_factor},
-          op: {op_lookup_by: 'LOOKUP BY'},
-          right: {factor: key_factor},
+          op_lookup_by: {
+            foreign_key: {factor: key_factor},
+            foreign_value: {factor: str_factor},
+          }
         },
-        op: {op_eq: '='},
-        right: {string: 'Acme Corp.'},
+        op: {
+          op_eq: '=',
+        },
+        right: {
+          string: 'Acme Corp.',
+        },
       }}
       it { expect(parser.parse).to eq expected }
     end
@@ -61,9 +191,10 @@ describe DDQL::Parser do
     context 'without comparison' do
       let(:expr)     { sub_expr }
       let(:expected) {{
-        left: {factor: str_factor},
-        op: {op_lookup_by: 'LOOKUP BY'},
-        right: {factor: key_factor},
+        op_lookup_by: {
+          foreign_key: {factor: key_factor},
+          foreign_value: {factor: str_factor},
+        }
       }}
       it { expect(parser.parse).to eq expected }
     end
@@ -72,7 +203,7 @@ describe DDQL::Parser do
   context 'boolean expressions' do
     context 'simple AND' do
       let(:expr)     { "[foo] = '1' AND [bar] != '2'" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         boolean_operator: {op_and: "AND"},
         lstatement: {
@@ -91,7 +222,7 @@ describe DDQL::Parser do
 
     context 'simple OR' do
       let(:expr)     { "[foo] = '1' OR [bar] != '2'" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         boolean_operator: {op_or: "OR"},
         lstatement: {
@@ -106,11 +237,62 @@ describe DDQL::Parser do
         },
       }}
       it { expect(parsed).to eq expected }
+
+      context 'case insensitive' do
+        let(:expr) { "[foo] = '1' or [bar] != '2'" }
+        it 'should be case-insensitive' do
+          pending 'Unsupported operation'
+          expect(parsed).to eq expected
+        end
+      end
+    end
+
+    context 'nested negates' do
+      context 'even' do
+        let(:expr) { "NOT NOT NOT NOT [foo] = '1'" }
+        let(:parsed) { described_class.parse(expr) }
+        let(:expected) {{
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        }}
+        it { expect(parsed).to eq expected }
+      end
+      context 'odd' do
+        let(:expr) { "NOT NOT NOT NOT NOT [foo] = '1'" }
+        let(:parsed) { described_class.parse(expr) }
+        let(:expected) {{
+          op_not: 'NOT',
+          left: {factor: 'foo'},
+          op: {op_eq: '='},
+          right: {int: 1},
+        }}
+        it { expect(parsed).to eq expected }
+      end
+      context 'yes/no even' do
+        let(:expr) { "NOT NOT NOT NOT NOT NOT [foo] NO" }
+        let(:parsed) { described_class.parse(expr) }
+        let(:expected) {{
+          left: {factor: 'foo'},
+          yes_no_op: {op_no: 'NO'},
+        }}
+        it { expect(parsed).to eq expected }
+      end
+      context 'yes/no odd' do
+        let(:expr) { "NOT NOT NOT NOT NOT [foo] YES" }
+        let(:parsed) { described_class.parse(expr) }
+        let(:expected) {{
+          op_not: 'NOT',
+          left: {factor: 'foo'},
+          yes_no_op: {op_yes: 'YES'},
+        }}
+        it { expect(parsed).to eq expected }
+      end
     end
 
     context 'negated left comparison with parens' do
       let(:expr)     { "NOT([foo] = '1') AND [bar] = '2'" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         lstatement: {
           op_not: 'NOT',
@@ -131,7 +313,7 @@ describe DDQL::Parser do
 
     context 'negated parenthetical expression' do
       let(:expr)     { "NOT([foo] = '1' AND [bar] = '2')" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         op_not: 'NOT',
         lstatement: {
@@ -152,7 +334,7 @@ describe DDQL::Parser do
 
     context 'negated right comparison' do
       let(:expr)     { "([foo] = '1') AND NOT ([bar] = '2')" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         lstatement: {
           left: {factor: 'foo'},
@@ -172,7 +354,7 @@ describe DDQL::Parser do
 
     context 'negated phrase' do
       let(:expr)     { "([foo] = '1') AND NOT ([bar] = '2' OR [baz] = '3')" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         lstatement: {
           left: {factor: 'foo'},
@@ -200,7 +382,7 @@ describe DDQL::Parser do
 
     context 'single paren clause' do
       let(:expr)     { "([foo] = '1') AND [bar] != '2'" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         boolean_operator: {op_and: "AND"},
         lstatement: {
@@ -219,7 +401,7 @@ describe DDQL::Parser do
 
     context 'extraneous parens' do
       let(:expr)     { "((( [foo] = '1.7' AND [bar] != '3.5' ) ) )" }
-      let(:parsed)   { described_class.new(expr).parse }
+      let(:parsed)   { described_class.parse(expr) }
       let(:expected) {{
         boolean_operator: {op_and: "AND"},
         lstatement: {
@@ -260,7 +442,7 @@ describe DDQL::Parser do
               right: {string: struct[:right]},
             }
             expected.delete(:right) if op_name == :op_empty # this is a postfix operation
-            expect(described_class.new(struct[:expr]).parse).to eq expected
+            expect(described_class.parse(struct[:expr])).to eq expected
           end
         end
       end
@@ -289,7 +471,7 @@ describe DDQL::Parser do
               op: {op_name => op},
               right: struct[:right],
             }
-            expect(described_class.new(struct[:expr]).parse).to eq expected
+            expect(described_class.parse(struct[:expr])).to eq expected
           end
         end
       end
@@ -309,18 +491,18 @@ describe DDQL::Parser do
               op: {op_is: 'IS'},
               right: {null_value_type: null_type},
             }
-            expect(described_class.new(expr).parse).to eq expected
+            expect(described_class.parse(expr)).to eq expected
           end
         end
       end
     end
-  
+
     context 'IS NULL' do
       let(:expected) {{
         left: {factor: 'end_date'},
         op: {op_is_null: 'IS NULL'},
       }}
-      it { expect(described_class.new('[end_date] IS NULL').parse).to eq expected }
+      it { expect(described_class.parse('[end_date] IS NULL')).to eq expected }
     end
 
     context 'IS NOT NULL' do
@@ -328,7 +510,7 @@ describe DDQL::Parser do
         left: {factor: 'baz'},
         op: {op_is_not_null: 'IS NOT NULL'},
       }}
-      it { expect(described_class.new('[baz] IS NOT NULL').parse).to eq expected }
+      it { expect(described_class.parse('[baz] IS NOT NULL')).to eq expected }
     end
 
     context 'string relational operators' do
@@ -348,7 +530,7 @@ describe DDQL::Parser do
                 op: {op_name => op},
                 right: {string: struct[:right]}
               }
-              expect(described_class.new(struct[:expr]).parse).to eq expected
+              expect(described_class.parse(struct[:expr])).to eq expected
             end
           end
         end
@@ -384,7 +566,7 @@ describe DDQL::Parser do
                 op: {op_name => op},
                 right: {string: struct[:right]}
               }
-              expect(described_class.new(struct[:expr]).parse).to eq expected
+              expect(described_class.parse(struct[:expr])).to eq expected
             end
           end
         end
@@ -409,7 +591,7 @@ describe DDQL::Parser do
                 op: {op_name => op},
                 right: {string: struct[:right]}
               }
-              expect(described_class.new(struct[:expr]).parse).to eq expected
+              expect(described_class.parse(struct[:expr])).to eq expected
             end
           end
         end
@@ -453,9 +635,9 @@ describe DDQL::Parser do
         expect(parser.parse).to eq expected
       end
 
-      context 'long query' do
-        let(:expr)     { File.read spec_resource 'support/long-expr.txt' }
-        let(:expected) { YAML.load_file spec_resource 'support/long-expr.yml' }
+      context 'very long query' do
+        let(:expr)     { File.read resource 'support/long-expr.txt' }
+        let(:expected) { YAML.load_file resource 'support/long-expr.yml' }
 
         example 'parens' do
           expect(parser.parse).to eq(expected), 'generated parse tree was wrong'
@@ -480,6 +662,17 @@ describe DDQL::Parser do
           left: {factor: 'AnotherBonus'},
           op: {op_lt: '<'},
           right: {currency_code: 'GBP', currency_value: {float: 10.1}},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+    end
+
+    context 'zero currencies' do
+      let(:expr) { %{[CashBonus] > 'FOO:0'} }
+        let(:expected) {{
+          left: {factor: 'CashBonus'},
+          op: {op_gt: '>'},
+          right: {currency_code: 'FOO', currency_value: {float: 0.0}},
         }}
 
         it { expect(parser.parse).to eq expected }
@@ -700,6 +893,195 @@ describe DDQL::Parser do
   end
 
   context 'subqueries' do
+    context 'aliasing' do
+      let(:nested_close) { DDQL::TokenType::NESTED_CLOSE_PATTERN }
+      let(:nested_expr)  { "#{nested_open} #{inner_expr} #{nested_close}" }
+      let(:nested_open)  { DDQL::TokenType::NESTED_OPEN_PATTERN }
+
+      context 'factor comparison with implicit description' do
+        let(:expr)     { "ALIAS {type: Issuer, expression: [foo] == '1'} AS [Jason]" }
+        let(:expected) {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {factor: 'foo'},
+            op: {op_eq: '=='},
+            right: {int: 1},
+          },
+          sub_query_alias: {factor: 'Jason', desc: 'Jason'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'factor comparison with explicit description' do
+        let(:expr)     { "ALIAS {type: Issuer, expression: [bar] > '2'} AS [BarComparison:Bar > 2]" }
+        let(:expected) {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {factor: 'bar'},
+            op: {op_gt: '>'},
+            right: {int: 2},
+          },
+          sub_query_alias: {factor: 'BarComparison', desc: 'Bar > 2'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'factor extraction with explicit description' do
+        let(:expr)     { "ALIAS {type: Issuer, expression: [bar]} AS [BarExtraction:Bar]" }
+        let(:expected) {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {factor: 'bar'},
+          sub_query_alias: {factor: 'BarExtraction', desc: 'Bar'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'factor extraction with implicit description' do
+        let(:expr)     { "ALIAS {type: Issuer, expression: [meh]} AS [Foo]" }
+        let(:expected) {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {factor: 'meh'},
+          sub_query_alias: {factor: 'Foo', desc: 'Foo'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'factor math with explicit description' do
+        let(:expr)     { "ALIAS {type: Issuer, expression: [foo] * '2'} AS [BarMath:Bar]" }
+        let(:expected) {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {factor: 'foo'},
+            op: {op_multiply: '*'},
+            right: {int: 2},
+          },
+          sub_query_alias: {factor: 'BarMath', desc: 'Bar'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'factor math with implicit description' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{inner_expr}} AS [1/7thOfNah]" }
+        let(:inner_expr) { "[nah] / '7.0'" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {factor: 'nah'},
+            op: { op_divide: '/'},
+            right: {float: 7.0},
+          },
+          sub_query_alias: {factor: '1/7thOfNah', desc: '1/7thOfNah'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'simple sub-expression as nested expressions' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{nested_expr}} AS [1/7thOfNah]" }
+        let(:inner_expr) { "[nah] / '7.0'" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {factor: 'nah'},
+            op: { op_divide: '/'},
+            right: {float: 7.0},
+          },
+          sub_query_alias: {factor: '1/7thOfNah', desc: '1/7thOfNah'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'another sub-expression with explicit description' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{nested_expr} } AS [SubExpr:Has More Than One Foo]" }
+        let(:inner_expr) { "CNT { type: Person, expression: [foo] } > '1'" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {
+              agg: {op_cnt: 'CNT'},
+              sub_query_expression: '[foo]',
+              sub_query_type: 'Person',
+            },
+            op: {op_gt: '>'},
+            right: {int: 1},
+          },
+          sub_query_alias: {factor: 'SubExpr', desc: 'Has More Than One Foo'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'another sub-expression with implicit description' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{nested_expr} } AS [SubExpression]" }
+        let(:inner_expr) { "EXISTS { type: Person, expression: [foo] } > '2'" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            left: {
+              agg: {op_exists: 'EXISTS'},
+              sub_query_expression: '[foo]',
+              sub_query_type: 'Person',
+            },
+            op: {op_gt: '>'},
+            right: {int: 2},
+          },
+          sub_query_alias: {factor: 'SubExpression', desc: 'SubExpression'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'a non-grouped sub-expression' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{nested_expr} } AS [MaxExpression]" }
+        let(:inner_expr) { "MAX { type: Person, expression: [foo] }" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            agg: {op_max: 'MAX'},
+            sub_query_expression: '[foo]',
+            sub_query_type: 'Person',
+          },
+          sub_query_alias: {factor: 'MaxExpression', desc: 'MaxExpression'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+
+      context 'a grouped sub-expression' do
+        let(:expr)       { "ALIAS {type: Issuer, expression: #{nested_expr} } AS [MinFooByBar:Minnie Mouse]" }
+        let(:inner_expr) { "MIN { type: Case, expression: [foo] != '19' } GROUP BY [bar]" }
+        let(:expected)   {{
+          agg: {op_alias: 'ALIAS'},
+          sub_query_type: 'Issuer',
+          sub_query: {
+            agg: {op_min: 'MIN'},
+            sub_query_expression: "[foo] != '19'",
+            sub_query_type: 'Case',
+            sub_query_grouping: {factor: 'bar'},
+          },
+          sub_query_alias: {factor: 'MinFooByBar', desc: 'Minnie Mouse'},
+        }}
+
+        it { expect(parser.parse).to eq expected }
+      end
+    end
+
     context 'with grouping' do
       let(:expr) { "MIN {type: Issuer, fields: [oekomCarbonRiskRating]} GROUP BY [oekomIndustry]" }
       let(:expected) {{
@@ -1079,6 +1461,85 @@ describe DDQL::Parser do
         it { expect(parser.parse).to eq expected }
       end
     end
+
+    context 'as lstatement' do
+      let(:expr) do
+        %{
+          CNT {
+            type: IssuerPerson,
+            fields: [],
+            expression: (
+              [ThreeYearTSRCumulative] < '0'
+              OR [ipAssociationType] == 'Director'
+              OR [AttendedLessThan75PctOfMeetings] YES
+              OR [IsDisclosedAsFinancialExpert] NO
+            )
+          } >= '2' AND ([NoOfPublicBoards] >= '4')
+        }.squish
+      end
+
+      let(:expected) do
+        {
+          lstatement: {
+            left: {
+              agg: {op_cnt: "CNT"},
+              sub_query_type: "IssuerPerson",
+              sub_query_expression:  %{(
+                [ThreeYearTSRCumulative] < '0'
+                  OR [ipAssociationType] == 'Director'
+                  OR [AttendedLessThan75PctOfMeetings] YES
+                  OR [IsDisclosedAsFinancialExpert] NO
+              )}.squish,
+            },
+            op: {op_ge: ">="},
+            right: {int: 2},
+          },
+          boolean_operator: {op_and: "AND"},
+          rstatement: {
+            left: {factor: "NoOfPublicBoards"},
+            op: {op_ge: ">="},
+            right: {int: 4},
+          },
+        }
+      end
+
+      it { expect(parser.parse).to eq expected }
+    end
+
+    context 'as rstatement' do
+      let(:expr) do
+        %{
+          ([NoOfPublicBoards] >= '4') OR
+          CNT {
+            type: IssuerPerson,
+            fields: [],
+            expression: [ThreeYearTSRCumulative] > '0'
+          } >= '2'
+        }.squish
+      end
+
+      let(:expected) do
+        {
+          rstatement: {
+            left: {
+              agg: {op_cnt: "CNT"},
+              sub_query_type: "IssuerPerson",
+              sub_query_expression: %{[ThreeYearTSRCumulative] > '0'},
+            },
+            op: {op_ge: ">="},
+            right: {int: 2},
+          },
+          boolean_operator: {op_or: "OR"},
+          lstatement: {
+            left: {factor: "NoOfPublicBoards"},
+            op: {op_ge: ">="},
+            right: {int: 4},
+          },
+        }
+      end
+
+      it { expect(parser.parse).to eq expected }
+    end
   end
 
   context 'special marker' do
@@ -1086,7 +1547,7 @@ describe DDQL::Parser do
       sym = marker.downcase.to_sym
 
       context 'in math expressions' do
-        let(:parser) { described_class.new expr }
+        let(:parser) { described_class.new expression: expr }
         let(:parsed) { parser.parse }
 
         context "($#{marker} - [BirthYear])" do
@@ -1120,15 +1581,6 @@ describe DDQL::Parser do
               right: {special_marker: {sym => "$#{marker}"}},
             },
           }}
-          let(:previous_impl_expected) {{
-            lstatement: {value_of: {factor: 'a'}},
-            operator: {op: {op_eq: '=='}},
-            rstatement: {
-              left: {int: 5},
-              op_add: '+',
-              right: {special_marker: {sym => "$#{marker}"}},
-            },
-          }}
           it { expect(parsed).to eq expected }
         end
 
@@ -1140,15 +1592,6 @@ describe DDQL::Parser do
             right: {
               left: {special_marker: {sym => "$#{marker}"}},
               op: {op_multiply: '*'},
-              right: {int: 2},
-            },
-          }}
-          let(:previous_impl_expected) {{
-            lstatement: {value_of: {factor: 'a'}},
-            operator: {op: {op_lt: '<'}},
-            rstatement: {
-              left: {special_marker: {sym => "$#{marker}"}},
-              op_multiply: '*',
               right: {int: 2},
             },
           }}
@@ -1166,15 +1609,6 @@ describe DDQL::Parser do
             op: {op_gt: '>'},
             right: {factor: 'b'},
           }}
-          let(:previous_impl_expected) {{
-            lstatement: {
-              left: {int: 5},
-              op_multiply: '*',
-              right: {special_marker: {sym => "$#{marker}"}},
-            },
-            operator: {op: {op_gt: '>'}},
-            rstatement: {value_of: {factor: 'b'}},
-          }}
           it { expect(parsed).to eq expected }
         end
 
@@ -1189,36 +1623,27 @@ describe DDQL::Parser do
             op: {op_divide: '/'},
             right: {special_marker: {sym => "$#{marker}"}},
           }}
-          let(:previous_impl_expected) {{
-            lstatement: {
-              left: {int: 5},
-              op_multiply: '*',
-              right: {special_marker: {sym => "$#{marker}"}},
-            },
-            math_operation: {op_divide: '/'},
-            rstatement: {special_marker: {sym => "$#{marker}"}},
-          }}
           it { expect(parsed).to eq expected }
         end
       end
 
       context 'in left position comparison' do
-        it { expect(described_class.new("$#{marker} == [foo]").parse[:left][:special_marker].keys).to eq [sym] }
+        it { expect(described_class.parse("$#{marker} == [foo]")[:left][:special_marker].keys).to eq [sym] }
       end
 
       context 'in right position comparison' do
-        it { expect(described_class.new("[a] > $#{marker}").parse[:right][:special_marker].keys).to eq [sym] }
+        it { expect(described_class.parse("[a] > $#{marker}")[:right][:special_marker].keys).to eq [sym] }
       end
 
       context 'by itself' do
-        it { expect(described_class.new("$#{marker}").parse[:special_marker].keys).to eq [sym] }
-        it { expect(described_class.new("(((((((($#{marker}))))))))").parse[:special_marker].keys).to eq [sym] }
+        it { expect(described_class.parse("$#{marker}")[:special_marker].keys).to eq [sym] }
+        it { expect(described_class.parse("(((((((($#{marker}))))))))")[:special_marker].keys).to eq [sym] }
       end
     end
   end
 
   context 'single YES/NO factor' do
-    let(:parser)   { described_class.new expr }
+    let(:parser)   { described_class.new expression: expr }
     let(:parsed)   { parser.parse }
     let(:expr)     { '[YesOrNo] NO' }
     let(:expected) {{
@@ -1230,7 +1655,7 @@ describe DDQL::Parser do
   end
 
   context 'boolean expression of YES/NO factors' do
-    let(:parser)   { described_class.new expr }
+    let(:parser)   { described_class.new expression: expr }
     let(:parsed)   { parser.parse }
     let(:expr)     { '[ServesAsChairman] YES AND [ServesAsCEO] YES' }
     let(:expected) {{
@@ -1269,7 +1694,7 @@ describe DDQL::Parser do
       operators.each do |op, op_sym|
         expr   = %{#{left} #{op} #{right}}
         it %{parses <#{expr}>} do
-          expect { described_class.new(expr).parse }.not_to raise_error
+          expect { described_class.parse(expr) }.not_to raise_error
         end
       end
     end
@@ -1280,7 +1705,7 @@ describe DDQL::Parser do
 
     context 'with comparison' do
       let(:expr)      { "#{sub_expr} YES" }
-      let(:screen_id) { 12345 }
+      let(:screen_id) { 1 }
       let(:expected)  {{
         left: {
           screen: screen_id,
@@ -1293,8 +1718,152 @@ describe DDQL::Parser do
     context 'without comparison' do
       let(:expr)      { sub_expr }
       let(:expected)  { {screen: screen_id,} }
-      let(:screen_id) { 98765 }
+      let(:screen_id) { 14 }
       it { expect(parser.parse).to eq expected }
     end
+  end
+
+  context 'various aggregation compositions' do
+    context 'agg bool stmt bool agg' do
+      let(:expression) do
+        "EXISTS {type: IssuerPerson, fields: [], expression: " \
+              "([CountryOfIncorporation] == 'USA' AND [YrDirectorBeganServingOnBoard] < '1997')" \
+              " OR ([CountryOfIncorporation] == 'United Kingdom' AND [YrDirectorBeganServingOnBoard] < '1987')}" \
+          " AND ([Gender] == 'M')" \
+          " AND EXISTS {type: IssuerCase, fields: [], expression: [CaseAreas] ANY 'Norms-Based Screening>Corruption'} "
+      end
+      let(:expected) {{
+        boolean_operator: {op_and: "AND"},
+        lstatement: {
+          boolean_operator: {op_and: "AND"},
+          lstatement: {
+            agg: {op_exists: "EXISTS"},
+            sub_query_expression:  "([CountryOfIncorporation] == 'USA' AND [YrDirectorBeganServingOnBoard] < '1997') OR ([CountryOfIncorporation] == 'United Kingdom' AND [YrDirectorBeganServingOnBoard] < '1987')",
+            sub_query_type: "IssuerPerson",
+          },
+          rstatement: {
+            left: {factor: "Gender"},
+            op: {op_eq: "=="},
+            right: {string: "M"},
+          },
+        },
+        rstatement: {
+          sub_query_type: "IssuerCase",
+          sub_query_expression: "[CaseAreas] ANY 'Norms-Based Screening>Corruption'",
+          agg: {op_exists: "EXISTS"},
+        },
+      }}
+
+      it 'should parse' do
+        expect(DDQL::Parser.parse(expression)).to eq expected
+      end
+    end
+
+    context 'stmt bool agg bool agg' do
+      let(:expression) do
+        "(([MarketCap] > '5000000000' AND [OverallQualityScoreDec] == '9'))" \
+          " AND EXISTS {type: IssuerPerson, fields: [], expression: [Age] == '33'} " \
+          " AND EXISTS {type: IssuerCase, fields: [], expression: [CaseAreas] ANY 'Norms-Based Screening>Corruption'} "
+      end
+      let(:expected) {{
+        lstatement: {
+          lstatement: {
+            left: {factor: 'MarketCap'},
+            op: {op_gt: '>'},
+            right: {int: 5000000000},
+          },
+          boolean_operator: {op_and: 'AND'},
+          rstatement: {
+            left: {factor: 'OverallQualityScoreDec'},
+            op: {op_eq: '=='},
+            right: {int: 9},
+          },
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          lstatement: {
+            agg: {op_exists: 'EXISTS'},
+            sub_query_type: 'IssuerPerson',
+            sub_query_expression: "[Age] == '33'",
+          },
+          boolean_operator: {op_and: 'AND'},
+          rstatement: {
+            agg: {op_exists: 'EXISTS'},
+            sub_query_type: 'IssuerCase',
+            sub_query_expression: "[CaseAreas] ANY 'Norms-Based Screening>Corruption'",
+          },
+        },
+      }}
+
+      it 'should parse' do
+        expect(DDQL::Parser.parse(expression)).to eq expected
+      end
+    end
+
+    context 'agg bool agg bool stmt' do
+      let(:expression) do
+        "EXISTS {type: IssuerPerson, fields: [], expression: [Age] == '33'} " \
+          " AND EXISTS {type: IssuerCase, fields: [], expression: [CaseAreas] ANY 'Norms-Based Screening>Corruption'} " \
+          " AND (([MarketCap] > '5000000000' AND [OverallQualityScoreDec] == '9'))"
+      end
+      let(:expected) {{
+        boolean_operator: {op_and: 'AND'},
+        lstatement: {
+          agg: {op_exists: 'EXISTS'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: "[Age] == '33'",
+        },
+        rstatement: {
+          boolean_operator: {op_and: 'AND'},
+          lstatement: {
+            agg: {op_exists: 'EXISTS'},
+            sub_query_type: 'IssuerCase',
+            sub_query_expression: "[CaseAreas] ANY 'Norms-Based Screening>Corruption'",
+          },
+          rstatement: {
+            lstatement: {
+              left: {factor: 'MarketCap'},
+              op: {op_gt: '>'},
+              right: {int: 5000000000},
+            },
+            boolean_operator: {op_and: 'AND'},
+            rstatement: {
+              left: {factor: 'OverallQualityScoreDec'},
+              op: {op_eq: '=='},
+              right: {int: 9},
+            },
+          },
+        },
+      }}
+
+      it 'should parse' do
+        expect(DDQL::Parser.parse(expression)).to eq expected
+      end
+    end
+
+    context 'agg bool agg' do
+      let(:expression) do
+        "EXISTS {type: IssuerPerson, fields: [], expression: [Age] == '33'} " \
+        "AND EXISTS {type: IssuerCase, fields: [], expression: [CaseAreas] ANY 'Norms-Based Screening>Corruption'} "
+      end
+      let(:expected) {{
+        lstatement: {
+          agg: {op_exists: 'EXISTS'},
+          sub_query_type: 'IssuerPerson',
+          sub_query_expression: "[Age] == '33'",
+        },
+        boolean_operator: {op_and: 'AND'},
+        rstatement: {
+          agg: {op_exists: 'EXISTS'},
+          sub_query_type: 'IssuerCase',
+          sub_query_expression: "[CaseAreas] ANY 'Norms-Based Screening>Corruption'",
+        },
+      }}
+
+      it 'should parse' do
+        expect(DDQL::Parser.parse(expression)).to eq expected
+      end
+    end
+
   end
 end

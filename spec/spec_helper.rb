@@ -1,9 +1,10 @@
 require 'bundler/setup'
 require 'rspec'
+require 'yaml'
 require 'ddql'
 
 module RSpecMixin
-  def spec_resource(path)
+  def resource(path)
     File.expand_path(path, File.dirname(__FILE__))
   end
 end

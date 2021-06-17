@@ -1,12 +1,11 @@
 require 'forwardable'
 
 module DDQL
-  
   class Token
-    using StringRefinements
-
     attr_reader :data, :type
     attr_accessor :location
+
+    using ::DDQL::StringRefinements
 
     def initialize(data:, location: nil, type:)
       @data     = data
@@ -50,6 +49,11 @@ module DDQL
       type.parse(parser, self, expression: expression)
     end
 
+    def post_process(parser:, expression:)
+      raise "#{type} doesn't support post-processing" unless supports_post_processing?
+      type.post_process(parser: parser, expression: expression)
+    end
+
     def postfix?
       type.postfix?
     end
@@ -62,12 +66,20 @@ module DDQL
       type.simple_comparison?(data)
     end
 
+    def supports_post_processing?
+      type.supports_post_processing?
+    end
+
     def to_h
       type.as_hash(data)
     end
 
     def to_s
       "#{type.name} : #{data}"
+    end
+
+    def type?(token_type)
+      token_type == type
     end
   end
 end

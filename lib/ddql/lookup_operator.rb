@@ -6,16 +6,18 @@ module DDQL
       super("LOOKUP BY", "Lookup", type: :infix, return_type: :string)
     end
 
-    def parse(parser, token, expression: nil)
+    def parse(parser, _token, expression: nil)
       precedence      = self.precedence
       precedence     -= 1 if right?
       next_expression = parser.parse(precedence: precedence)
-      op_expression   = token.as_hash
-      
+
+      foreign_value_factor = expression[:factor]
+      foreign_key_factor = (next_expression.delete(:left) || next_expression)[:factor]
       {
-        left: expression,
-        op: op_expression[:op],
-        right: next_expression.delete(:left) || next_expression,
+        op_lookup_by: {
+          foreign_key: {factor: foreign_key_factor},
+          foreign_value: {factor: foreign_value_factor},
+        },
       }
     end
   end
